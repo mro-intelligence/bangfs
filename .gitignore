@@ -14,4 +14,4 @@ bangfs-*
 .DS_Store
 
 # Misc
-.../__pycache__
+**/__pycache__

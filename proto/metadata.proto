@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+package bangfs;
+
+option go_package = "bangfs/proto";
+
+// ChunkRef references a chunk within a file
+message ChunkRef {
+    uint32 index = 1;       // position in file (0-indexed)
+    bytes hash = 2;         // fvoll hash of chunk content (chunk ID)
+    uint32 size = 3;        // actual size of this chunk
+}
+
+// FileMeta represents metadata for a regular file
+// NOTE: inode number is NOT stored here - it's the key in the KV store
+message FileMeta {
+    // Identity (inode is the KV key, not stored in value)
+    string name = 1;
+    uint64 parent_inode = 2;
+
+    // Attributes (POSIX-like)
+    uint32 mode = 3;
+    uint32 uid = 4;
+    uint32 gid = 5;
+    uint64 size = 6;
+
+    // Timestamps (nanoseconds since epoch)
+    int64 ctime_ns = 7;
+    int64 mtime_ns = 8;
+    int64 atime_ns = 9;
+
+    // Chunk mapping (ordered list - position matters!)
+    repeated ChunkRef chunks = 10;
+
+    // Optional
+    uint32 nlink = 11;
+    uint64 version = 12;
+}
+
+// DirMeta represents metadata for a directory
+// NOTE: inode number is NOT stored here - it's the key in the KV store
+message DirMeta {
+    // Identity (inode is the KV key, not stored in value)
+    string name = 1;
+    uint64 parent_inode = 2;
+
+    // Attributes
+    uint32 mode = 3;
+    uint32 uid = 4;
+    uint32 gid = 5;
+
+    // Timestamps (nanoseconds since epoch)
+    int64 ctime_ns = 6;
+    int64 mtime_ns = 7;
+    int64 atime_ns = 8;
+
+    // Children (list of child inodes)
+    repeated uint64 children = 9;
+
+    // Optional
+    uint32 nlink = 10;
+    uint64 version = 11;
+}
+
+// InodeMeta is a union type for file or directory metadata
+message InodeMeta {
+    oneof meta {
+        FileMeta file = 1;
+        DirMeta dir = 2;
+    }
+}
