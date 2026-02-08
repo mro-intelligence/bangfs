@@ -1,10 +1,16 @@
-.PHONY: proto build clean install-tools all
+.PHONY: proto clean install-tools all test
 
 # Quick build (no proto regeneration)
-build:
+mount-fuse-bangfs: ./cmd/mount-fuse-bangfs/*.go ./fuse/*.go
 	go build -o mount-fuse-bangfs ./cmd/mount-fuse-bangfs
+
+mkfs-bangfs: ./cmd/mkfs-bangfs/*.go ./fuse/*.go
 	go build -o mkfs-bangfs ./cmd/mkfs-bangfs
+
+reformat-bangfs: ./cmd/reformat-bangfs/*.go ./fuse/*.go
 	go build -o reformat-bangfs ./cmd/reformat-bangfs
+
+build: mount-fuse-bangfs mkfs-bangfs reformat-bangfs
 
 # Full build with proto regeneration
 all: proto build
@@ -21,3 +27,6 @@ clean:
 # Install required tools (protoc-gen-go)
 install-tools:
 	go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+
+test:
+	cd test && python3 test_bangfs.py
