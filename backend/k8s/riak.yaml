@@ -1,0 +1,166 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bangfs
+---
+# Headless service for peer discovery during cluster formation.
+# publishNotReadyAddresses ensures pods appear in DNS before passing
+# readiness checks, which is needed for initial cluster bootstrapping.
+apiVersion: v1
+kind: Service
+metadata:
+  name: riak-headless
+  namespace: bangfs
+  labels:
+    app: riak
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app: riak
+  ports:
+    - name: http
+      port: 8098
+      targetPort: 8098
+    - name: protobuf
+      port: 8087
+      targetPort: 8087
+---
+# Client-facing service for applications that talk to Riak.
+apiVersion: v1
+kind: Service
+metadata:
+  name: riak
+  namespace: bangfs
+  labels:
+    app: riak
+spec:
+  selector:
+    app: riak
+  ports:
+    - name: http
+      port: 8098
+      targetPort: 8098
+    - name: protobuf
+      port: 8087
+      targetPort: 8087
+---
+# We use a stateful set because riak nodes in a cluster still have
+# a fixed identity. We would like it if nodes were automatically
+# removed from the cluster by riak if they are failed for some time
+# but it doesn't look like its the case and riak-admin command must
+# be used.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: riak
+  namespace: bangfs
+  labels:
+    app: riak
+spec:
+  serviceName: riak-headless
+  replicas: 4
+  selector:
+    matchLabels:
+      app: riak
+  template:
+    metadata:
+      labels:
+        app: riak
+    spec:
+    # Make scheduler try not to place riak pods on the same node,
+    # i.e., distribute them among nodes for reliability.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - riak
+              topologyKey: topology.kubernetes.io/zone
+      terminationGracePeriodSeconds: 60
+      volumes:
+        - name: riak-data
+          emptyDir:
+            sizeLimit: 10Gi
+      containers:
+        - name: riak
+          image: localhost:30500/bangriak
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+
+              echo "This is a dummy script"
+              while true; do echo "$(date): sleeping..."; sleep 10; done
+              exit 0
+
+
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          ports:
+            - name: http
+              containerPort: 8098
+            - name: protobuf
+              containerPort: 8087
+            - name: epmd
+              containerPort: 4369
+            - name: handoff
+              containerPort: 8099
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: riak-data
+              mountPath: /opt/riak/data
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1"
+          # readinessProbe:
+          #   httpGet:
+          #     path: /ping
+          #     port: 8098
+          #   initialDelaySeconds: 30
+          #   periodSeconds: 10
+          # livenessProbe:
+          #   httpGet:
+          #     path: /ping
+          #     port: 8098
+          #   initialDelaySeconds: 60
+          #   periodSeconds: 30
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/bash
+                  - -c
+                  - |
+                    export PATH="/opt/riak/bin:$PATH"
+                    riak-admin cluster leave
+                    riak-admin cluster plan
+                    riak-admin cluster commit
+                    sleep 5
+                    riak stop
+
+
+
+
+    
