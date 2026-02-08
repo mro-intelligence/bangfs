@@ -11,8 +11,8 @@ Usage:
     python3 test_bangfs.py /path/to/mount     # Use custom mountpoint (legacy mode)
 
 Configuration (via environment or defaults):
-    BANGFS_HOST=172.17.0.2
-    BANGFS_PORT=8087
+    RIAK_HOST=172.17.0.2
+    RIAK_PORT=8087
     BANGFS_NAMESPACE=foobar
     BANGFS_MOUNTDIR=/tmp/bangfs
 
@@ -680,9 +680,9 @@ Examples:
                         help="Skip setup (wipe, mkfs, mount)")
     parser.add_argument("--no-teardown", action="store_true",
                         help="Skip teardown (keep filesystem mounted)")
-    parser.add_argument("--host", default=os.environ.get("BANGFS_HOST", DEFAULT_RIAK_HOST),
+    parser.add_argument("--host", default=os.environ.get("RIAK_HOST", DEFAULT_RIAK_HOST),
                         help=f"Riak host (default: {DEFAULT_RIAK_HOST})")
-    parser.add_argument("--port", default=os.environ.get("BANGFS_PORT", DEFAULT_RIAK_PORT),
+    parser.add_argument("--port", default=os.environ.get("RIAK_PORT", DEFAULT_RIAK_PORT),
                         help=f"Riak port (default: {DEFAULT_RIAK_PORT})")
     parser.add_argument("--namespace", default=os.environ.get("BANGFS_NAMESPACE", DEFAULT_NAMESPACE),
                         help=f"Filesystem namespace (default: {DEFAULT_NAMESPACE})")
