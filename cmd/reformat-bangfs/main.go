@@ -31,8 +31,8 @@ func envPortOrDefault(key string, fallback uint) uint {
 }
 
 func main() {
-	host := flag.String("host", envOrDefault("BANGFS_HOST", ""), "Riak host (env: BANGFS_HOST)")
-	port := flag.Uint("port", envPortOrDefault("BANGFS_PORT", 8087), "Riak port (env: BANGFS_PORT)")
+	host := flag.String("host", envOrDefault("RIAK_HOST", ""), "Riak host (env: RIAK_HOST)")
+	port := flag.Uint("port", envPortOrDefault("RIAK_PORT", 8087), "Riak port (env: RIAK_PORT)")
 	namespace := flag.String("namespace", envOrDefault("BANGFS_NAMESPACE", ""), "Filesystem namespace (env: BANGFS_NAMESPACE)")
 	force := flag.Bool("force", false, "Skip confirmation prompt")
 
@@ -40,7 +40,7 @@ func main() {
 
 	// Validate required args
 	if *host == "" || *namespace == "" {
-		log.Println("Error: -host and -namespace are required (or set BANGFS_HOST, BANGFS_NAMESPACE)")
+		log.Println("Error: -host and -namespace are required (or set RIAK_HOST, BANGFS_NAMESPACE)")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -69,7 +69,7 @@ func main() {
 	}
 	defer kv.Close()
 
-	// Wipe filesystem
+	// Wipe filesystem data
 	log.Printf("Wiping filesystem with namespace '%s'...", *namespace)
 	if err := kv.WipeBackend(); err != nil {
 		log.Fatalf("Failed to wipe filesystem: %v", err)

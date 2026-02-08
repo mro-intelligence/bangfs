@@ -40,7 +40,7 @@ var _ = (fs.NodeWriter)((*BangFile)(nil))
 // Getattr returns file attributes
 func (bf *BangFile) Getattr(ctx context.Context, _ fs.FileHandle, out_attr *fuse.AttrOut) syscall.Errno {
 	op := trace().Op("bf.Getattr", bf.inum, "")
-	meta, err := bf.kv.Metadata(bf.inum)
+	meta, _, err := bf.kv.Metadata(bf.inum)
 	if err != nil {
 		op.Error(err)
 		return syscall.EIO
@@ -52,7 +52,7 @@ func (bf *BangFile) Getattr(ctx context.Context, _ fs.FileHandle, out_attr *fuse
 
 // Setattr sets file attributes (chmod, chown, truncate, utimes)
 func (bf *BangFile) Setattr(ctx context.Context, _ fs.FileHandle, in_attr *fuse.SetAttrIn, out_attr *fuse.AttrOut) syscall.Errno {
-	meta, err := bf.kv.Metadata(bf.inum)
+	meta, vclock, err := bf.kv.Metadata(bf.inum)
 	if err != nil {
 		return syscall.EIO
 	}
@@ -86,7 +86,7 @@ func (bf *BangFile) Setattr(ctx context.Context, _ fs.FileHandle, in_attr *fuse.
 
 	filemeta.CtimeNs = time.Now().UnixNano()
 
-	if err := bf.kv.PutMetadata(bf.inum, meta, meta); err != nil {
+	if err := bf.kv.UpdateMetadata(bf.inum, meta, vclock); err != nil {
 		return syscall.EIO
 	}
 
@@ -135,7 +135,7 @@ var _ = (fs.NodeRenamer)((*BangDirNode)(nil))
 // Lookup finds a child by name
 func (d *BangDirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	op := trace().Op("Lookup", d.inum, name)
-	dirMeta, err := d.kv.Metadata(d.inum)
+	dirMeta, _, err := d.kv.Metadata(d.inum)
 	if err != nil {
 		op.Error(err)
 		return nil, syscall.EIO
@@ -148,7 +148,7 @@ func (d *BangDirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 
 	// Search children for matching name
 	for _, childInum := range dir.Children {
-		childMeta, err := d.kv.Metadata(childInum)
+		childMeta, _, err := d.kv.Metadata(childInum)
 		if err != nil {
 			continue
 		}
@@ -187,7 +187,7 @@ func (d *BangDirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 
 // Readdir lists directory contents
 func (d *BangDirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
-	dirMeta, err := d.kv.Metadata(d.inum)
+	dirMeta, _, err := d.kv.Metadata(d.inum)
 	if err != nil {
 		return nil, syscall.EIO
 	}
@@ -200,7 +200,7 @@ func (d *BangDirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno)
 	entries := []fuse.DirEntry{}
 
 	for _, childInum := range dir.Children {
-		childMeta, err := d.kv.Metadata(childInum)
+		childMeta, _, err := d.kv.Metadata(childInum)
 		if err != nil {
 			continue
 		}
@@ -225,7 +225,7 @@ func (d *BangDirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno)
 func (d *BangDirNode) Create(ctx context.Context, name string, _ uint32 /*flags*/, mode uint32, out *fuse.EntryOut) (inode *fs.Inode, fh fs.FileHandle, fuseFlags uint32, errno syscall.Errno) {
 	op := trace().Op("Create", d.inum, name)
 	// Check if name already exists
-	dirMeta, err := d.kv.Metadata(d.inum)
+	dirMeta, dirVClock, err := d.kv.Metadata(d.inum)
 	if err != nil {
 		op.Error(err)
 		return nil, nil, 0, syscall.EIO
@@ -236,7 +236,7 @@ func (d *BangDirNode) Create(ctx context.Context, name string, _ uint32 /*flags*
 	}
 
 	for _, childInum := range dir.Children {
-		childMeta, _ := d.kv.Metadata(childInum)
+		childMeta, _, _ := d.kv.Metadata(childInum)
 		if childMeta != nil {
 			var childName string
 			switch m := childMeta.Meta.(type) {
@@ -279,7 +279,7 @@ func (d *BangDirNode) Create(ctx context.Context, name string, _ uint32 /*flags*
 		},
 	}
 
-	if err := d.kv.PutMetadata(newInum, nil, fileMeta); err != nil {
+	if err := d.kv.PutMetadata(newInum, fileMeta); err != nil {
 		op.Error(err)
 		return nil, nil, 0, syscall.EIO
 	}
@@ -288,7 +288,7 @@ func (d *BangDirNode) Create(ctx context.Context, name string, _ uint32 /*flags*
 	dir.Children = append(dir.Children, newInum)
 	dir.MtimeNs = now
 	dir.CtimeNs = now
-	if err := d.kv.PutMetadata(d.inum, dirMeta, dirMeta); err != nil {
+	if err := d.kv.UpdateMetadata(d.inum, dirMeta, dirVClock); err != nil {
 		op.Error(err)
 		return nil, nil, 0, syscall.EIO
 	}
@@ -303,7 +303,7 @@ func (d *BangDirNode) Create(ctx context.Context, name string, _ uint32 /*flags*
 func (d *BangDirNode) Mkdir(ctx context.Context, name string, mode uint32, out *fuse.EntryOut) (*fs.Inode, syscall.Errno) {
 	op := trace().Op("Mkdir", d.inum, name)
 	// Check if name already exists
-	dirMeta, err := d.kv.Metadata(d.inum)
+	dirMeta, dirVClock, err := d.kv.Metadata(d.inum)
 	if err != nil {
 		op.Error(err)
 		return nil, syscall.EIO
@@ -314,7 +314,7 @@ func (d *BangDirNode) Mkdir(ctx context.Context, name string, mode uint32, out *
 	}
 
 	for _, childInum := range dir.Children {
-		childMeta, _ := d.kv.Metadata(childInum)
+		childMeta, _, _ := d.kv.Metadata(childInum)
 		if childMeta != nil {
 			var childName string
 			switch m := childMeta.Meta.(type) {
@@ -356,7 +356,7 @@ func (d *BangDirNode) Mkdir(ctx context.Context, name string, mode uint32, out *
 		},
 	}
 
-	if err := d.kv.PutMetadata(newInum, nil, newDirMeta); err != nil {
+	if err := d.kv.PutMetadata(newInum, newDirMeta); err != nil {
 		op.Error(err)
 		return nil, syscall.EIO
 	}
@@ -366,7 +366,7 @@ func (d *BangDirNode) Mkdir(ctx context.Context, name string, mode uint32, out *
 	dir.MtimeNs = now
 	dir.CtimeNs = now
 	dir.Nlink++
-	if err := d.kv.PutMetadata(d.inum, dirMeta, dirMeta); err != nil {
+	if err := d.kv.UpdateMetadata(d.inum, dirMeta, dirVClock); err != nil {
 		op.Error(err)
 		return nil, syscall.EIO
 	}
@@ -380,7 +380,7 @@ func (d *BangDirNode) Mkdir(ctx context.Context, name string, mode uint32, out *
 // Unlink removes a file
 func (d *BangDirNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	op := trace().Op("Unlink", d.inum, name)
-	dirMeta, err := d.kv.Metadata(d.inum)
+	dirMeta, dirVClock, err := d.kv.Metadata(d.inum)
 	if err != nil {
 		op.Error(err)
 		return syscall.EIO
@@ -395,7 +395,7 @@ func (d *BangDirNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	var targetInum uint64
 	var targetIdx int = -1
 	for i, childInum := range dir.Children {
-		childMeta, err := d.kv.Metadata(childInum)
+		childMeta, _, err := d.kv.Metadata(childInum)
 		if err != nil {
 			continue
 		}
@@ -423,7 +423,7 @@ func (d *BangDirNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	now := time.Now().UnixNano()
 	dir.MtimeNs = now
 	dir.CtimeNs = now
-	if err := d.kv.PutMetadata(d.inum, dirMeta, dirMeta); err != nil {
+	if err := d.kv.UpdateMetadata(d.inum, dirMeta, dirVClock); err != nil {
 		op.Error(err)
 		return syscall.EIO
 	}
@@ -441,7 +441,7 @@ func (d *BangDirNode) Unlink(ctx context.Context, name string) syscall.Errno {
 // Rmdir removes an empty directory
 func (d *BangDirNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	op := trace().Op("Rmdir", d.inum, name)
-	dirMeta, err := d.kv.Metadata(d.inum)
+	dirMeta, dirVClock, err := d.kv.Metadata(d.inum)
 	if err != nil {
 		op.Error(err)
 		return syscall.EIO
@@ -456,7 +456,7 @@ func (d *BangDirNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	var targetInum uint64
 	var targetIdx int = -1
 	for i, childInum := range dir.Children {
-		childMeta, err := d.kv.Metadata(childInum)
+		childMeta, _, err := d.kv.Metadata(childInum)
 		if err != nil {
 			continue
 		}
@@ -490,7 +490,7 @@ func (d *BangDirNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	dir.MtimeNs = now
 	dir.CtimeNs = now
 	dir.Nlink--
-	if err := d.kv.PutMetadata(d.inum, dirMeta); err != nil {
+	if err := d.kv.UpdateMetadata(d.inum, dirMeta, dirVClock); err != nil {
 		op.Error(err)
 		return syscall.EIO
 	}
@@ -508,7 +508,7 @@ func (d *BangDirNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 // Rename moves/renames a file or directory
 func (d *BangDirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
 	// Get source directory metadata
-	srcDirMeta, err := d.kv.Metadata(d.inum)
+	srcDirMeta, srcDirVClock, err := d.kv.Metadata(d.inum)
 	if err != nil {
 		return syscall.EIO
 	}
@@ -522,7 +522,7 @@ func (d *BangDirNode) Rename(ctx context.Context, name string, newParent fs.Inod
 	var srcIdx int = -1
 	var srcIsDir bool
 	for i, childInum := range srcDir.Children {
-		childMeta, err := d.kv.Metadata(childInum)
+		childMeta, _, err := d.kv.Metadata(childInum)
 		if err != nil {
 			continue
 		}
@@ -553,7 +553,7 @@ func (d *BangDirNode) Rename(ctx context.Context, name string, newParent fs.Inod
 		return syscall.EINVAL
 	}
 
-	dstDirMeta, err := d.kv.Metadata(dstParent.inum)
+	dstDirMeta, dstDirVClock, err := d.kv.Metadata(dstParent.inum)
 	if err != nil {
 		return syscall.EIO
 	}
@@ -564,7 +564,7 @@ func (d *BangDirNode) Rename(ctx context.Context, name string, newParent fs.Inod
 
 	// Check if destination name exists and remove it
 	for i, childInum := range dstDir.Children {
-		childMeta, err := d.kv.Metadata(childInum)
+		childMeta, _, err := d.kv.Metadata(childInum)
 		if err != nil {
 			continue
 		}
@@ -589,7 +589,7 @@ func (d *BangDirNode) Rename(ctx context.Context, name string, newParent fs.Inod
 	}
 
 	// Update source metadata with new name and parent
-	srcMeta, err := d.kv.Metadata(srcInum)
+	srcMeta, srcVClock, err := d.kv.Metadata(srcInum)
 	if err != nil {
 		return syscall.EIO
 	}
@@ -606,7 +606,7 @@ func (d *BangDirNode) Rename(ctx context.Context, name string, newParent fs.Inod
 		m.File.CtimeNs = now
 	}
 
-	if err := d.kv.PutMetadata(srcInum, srcMeta); err != nil {
+	if err := d.kv.UpdateMetadata(srcInum, srcMeta, srcVClock); err != nil {
 		return syscall.EIO
 	}
 
@@ -627,11 +627,11 @@ func (d *BangDirNode) Rename(ctx context.Context, name string, newParent fs.Inod
 	}
 
 	// Save both parents (might be same directory)
-	if err := d.kv.PutMetadata(d.inum, srcDirMeta); err != nil {
+	if err := d.kv.UpdateMetadata(d.inum, srcDirMeta, srcDirVClock); err != nil {
 		return syscall.EIO
 	}
 	if dstParent.inum != d.inum {
-		if err := d.kv.PutMetadata(dstParent.inum, dstDirMeta); err != nil {
+		if err := d.kv.UpdateMetadata(dstParent.inum, dstDirMeta, dstDirVClock); err != nil {
 			return syscall.EIO
 		}
 	}

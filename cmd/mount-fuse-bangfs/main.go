@@ -31,8 +31,8 @@ func envPortOrDefault(key string, fallback uint) uint {
 }
 
 func main() {
-	host := flag.String("host", envOrDefault("BANGFS_HOST", ""), "Riak host (env: BANGFS_HOST)")
-	port := flag.Uint("port", envPortOrDefault("BANGFS_PORT", 8087), "Riak port (env: BANGFS_PORT)")
+	host := flag.String("host", envOrDefault("RIAK_HOST", ""), "Riak host (env: RIAK_HOST)")
+	port := flag.Uint("port", envPortOrDefault("RIAK_PORT", 8087), "Riak port (env: RIAK_PORT)")
 	namespace := flag.String("namespace", envOrDefault("BANGFS_NAMESPACE", ""), "Filesystem namespace (env: BANGFS_NAMESPACE)")
 	mountpoint := flag.String("mount", envOrDefault("BANGFS_MOUNTDIR", ""), "Mount point (env: BANGFS_MOUNTDIR)")
 	daemon := flag.Bool("daemon", false, "Run in background (daemon mode)")
@@ -48,7 +48,7 @@ func main() {
 
 	// Validate required args
 	if *host == "" || *namespace == "" || *mountpoint == "" {
-		log.Println("Error: -host, -namespace, and -mount are required (or set BANGFS_HOST, BANGFS_NAMESPACE, BANGFS_MOUNTDIR)")
+		log.Println("Error: -host, -namespace, and -mount are required (or set RIAK_HOST, BANGFS_NAMESPACE, BANGFS_MOUNTDIR)")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -77,7 +77,7 @@ func main() {
 	defer kv.Close()
 
 	// Verify filesystem exists (inode 0)
-	_, err = kv.Metadata(0)
+	_, _, err = kv.Metadata(0)
 	if err != nil {
 		log.Fatalf("Filesystem not initialized. Run mkbangfs first.\n\n%s", kv.SetupInstructions())
 	}

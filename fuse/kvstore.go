@@ -9,16 +9,18 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	pb "bangfs/proto"
-	"bangfs/util"
+	//"bangfs/util"
 )
 
 // KVStore holds a connection to the Riak backend
 type KVStore struct {
 	metadataBucket string
 	chunkBucket    string
+	counterBucket  string
 	cluster        *riak.Cluster
 	host           string
-	port           uint16
+	pb_port        uint16
+	//rest_port      uint16
 }
 
 // NewKVStore creates a new KVStore instance
@@ -26,8 +28,10 @@ func NewKVStore(host string, port uint16, namespace string) (*KVStore, error) {
 	kv := &KVStore{
 		metadataBucket: namespace + "_bangfs_metadata",
 		chunkBucket:    namespace + "_bangfs_chunks",
+		counterBucket:  namespace + "_bangfs_counters",
 		host:           host,
-		port:           port,
+		pb_port:        port,
+		//rest_port:      8098, // TODO: default, add option later.
 	}
 	if err := kv.Connect(); err != nil {
 		return kv, err // use kv for latter printing of the values
@@ -40,7 +44,7 @@ func NewKVStore(host string, port uint16, namespace string) (*KVStore, error) {
 
 // Connect connects or reconnects to the backend
 func (kv *KVStore) Connect() error {
-	nodeAddr := fmt.Sprintf("%s:%d", kv.host, kv.port)
+	nodeAddr := fmt.Sprintf("%s:%d", kv.host, kv.pb_port)
 	nodeOpts := &riak.NodeOptions{
 		RemoteAddress: nodeAddr,
 	}
@@ -79,63 +83,11 @@ func (kv *KVStore) Close() error {
 // ErrConcurrentModification is returned when a CAS operation fails due to concurrent modification
 var ErrConcurrentModification = fmt.Errorf("concurrent modification detected")
 
-// getVersion extracts the version from metadata
-func getVersion(meta *pb.InodeMeta) uint64 {
-	switch m := meta.Meta.(type) {
-	case *pb.InodeMeta_File:
-		return m.File.Version
-	case *pb.InodeMeta_Dir:
-		return m.Dir.Version
-	}
-	return 0
-}
-
-// setVersion sets the version on metadata
-func setVersion(meta *pb.InodeMeta, version uint64) {
-	switch m := meta.Meta.(type) {
-	case *pb.InodeMeta_File:
-		m.File.Version = version
-	case *pb.InodeMeta_Dir:
-		m.Dir.Version = version
-	}
-}
-
-// PutMetadata stores inode metadata with optimistic concurrency control.
+// UpdateMetadata stores inode metadata with optimistic concurrency control.
 // If oldMeta is non-nil, it verifies the current version matches before updating.
 // The version is automatically incremented on successful write.
-func (kv *KVStore) PutMetadata(key uint64, oldMeta, newMeta *pb.InodeMeta) error {
-	tracer := util.GetTracer()
-
-	// If oldMeta provided, do compare-and-set
-	if oldMeta != nil {
-		trace := tracer.KV("PutMetadata.CAS", key)
-		currentMeta, err := kv.Metadata(key)
-		if err != nil {
-			trace.Error(err)
-			return fmt.Errorf("failed to fetch current metadata for CAS: %w", err)
-		}
-
-		oldVersion := getVersion(oldMeta)
-		currentVersion := getVersion(currentMeta)
-
-		if oldVersion != currentVersion {
-			err := fmt.Errorf("%w: expected version %d, got %d", ErrConcurrentModification, oldVersion, currentVersion)
-			trace.Error(err)
-			return err
-		}
-
-		// Increment version for the new write
-		newVersion := currentVersion + 1
-		setVersion(newMeta, newVersion)
-		trace.Done()
-		tracer.KV(fmt.Sprintf("PutMetadata.version %d->%d", currentVersion, newVersion), key).Done()
-	} else {
-		// No CAS, but still increment version if it's 0 (new object)
-		if getVersion(newMeta) == 0 {
-			setVersion(newMeta, 1)
-			tracer.KV("PutMetadata.init version=1", key).Done()
-		}
-	}
+func (kv *KVStore) PutMetadata(key uint64, newMeta *pb.InodeMeta) error {
+	//tracer := util.GetTracer()
 
 	data, err := proto.Marshal(newMeta)
 	if err != nil {
@@ -149,9 +101,51 @@ func (kv *KVStore) PutMetadata(key uint64, oldMeta, newMeta *pb.InodeMeta) error
 		Value:       data,
 	}
 
+	// Use WithIfNotModified to prevent inconsistent writes.
+	// Its probably overkill for some attributes (permission changes, etc)
+	// but its convenient and will prevent race conditions.
 	cmd, err := riak.NewStoreValueCommandBuilder().
+		WithBucketType(kv.metadataBucket).
 		WithBucket(kv.metadataBucket).
 		WithContent(obj).
+		WithIfNoneMatch(true).
+		Build()
+	if err != nil {
+		return fmt.Errorf("failed to build store command: %w", err)
+	}
+
+	if err := kv.cluster.Execute(cmd); err != nil {
+		return fmt.Errorf("failed to execute store: %w", err)
+	}
+	return nil
+}
+// UpdateMetadata stores inode metadata with optimistic concurrency control.
+// If oldMeta is non-nil, it verifies the current version matches before updating.
+// The version is automatically incremented on successful write.
+func (kv *KVStore) UpdateMetadata(key uint64, newMeta *pb.InodeMeta, vclock_in []byte) error {
+	//tracer := util.GetTracer()
+
+	data, err := proto.Marshal(newMeta)
+	if err != nil {
+		return fmt.Errorf("failed to marshal metadata: %w", err)
+	}
+
+	obj := &riak.Object{
+		Bucket:      kv.metadataBucket,
+		Key:         fmt.Sprintf("%d", key),
+		ContentType: "application/protobuf",
+		Value:       data,
+		VClock:      vclock_in,
+	}
+
+	// Use WithIfNotModified to prevent inconsistent writes.
+	// Its probably overkill for some attributes (permission changes, etc)
+	// but its convenient and will prevent race conditions.
+	cmd, err := riak.NewStoreValueCommandBuilder().
+		WithBucketType(kv.metadataBucket).
+		WithBucket(kv.metadataBucket).
+		WithContent(obj).
+		WithIfNotModified(true).
 		Build()
 	if err != nil {
 		return fmt.Errorf("failed to build store command: %w", err)
@@ -164,34 +158,36 @@ func (kv *KVStore) PutMetadata(key uint64, oldMeta, newMeta *pb.InodeMeta) error
 }
 
 // GetMeta retrieves inode metadata
-func (kv *KVStore) Metadata(key uint64) (*pb.InodeMeta, error) {
+func (kv *KVStore) Metadata(key uint64) (*pb.InodeMeta, /*vclock*/ []byte, error) {
 	cmd, err := riak.NewFetchValueCommandBuilder().
+		WithBucketType(kv.metadataBucket).
 		WithBucket(kv.metadataBucket).
 		WithKey(fmt.Sprintf("%d", key)).
 		Build()
 	if err != nil {
-		return nil, fmt.Errorf("failed to build fetch command: %w", err)
+		return nil, nil, fmt.Errorf("failed to build fetch command: %w", err)
 	}
 
 	if err := kv.cluster.Execute(cmd); err != nil {
-		return nil, fmt.Errorf("failed to execute fetch: %w", err)
+		return nil, nil, fmt.Errorf("failed to execute fetch: %w", err)
 	}
 
 	fvc := cmd.(*riak.FetchValueCommand)
 	if fvc.Response == nil || len(fvc.Response.Values) == 0 {
-		return nil, fmt.Errorf("key not found: %d", key)
+		return nil, nil, fmt.Errorf("key not found: %d", key)
 	}
 
 	meta := &pb.InodeMeta{}
 	if err := proto.Unmarshal(fvc.Response.Values[0].Value, meta); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
+		return nil, nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
 	}
-	return meta, nil
+	return meta, fvc.Response.VClock, nil
 }
 
 // DeleteMeta deletes inode metadata
 func (kv *KVStore) DeleteMetadata(key uint64) error {
 	cmd, err := riak.NewDeleteValueCommandBuilder().
+		WithBucketType(kv.metadataBucket).
 		WithBucket(kv.metadataBucket).
 		WithKey(fmt.Sprintf("%d", key)).
 		Build()
@@ -205,53 +201,32 @@ func (kv *KVStore) DeleteMetadata(key uint64) error {
 	return nil
 }
 
-// AllocInode allocates a new unique inode number
-// Uses key "next_inode" in metadata bucket to track the counter
+// AllocInode allocates a new unique inode number using a Riak CRDT counter.
+// The counter is atomic so concurrent allocations are safe.
 func (kv *KVStore) AllocInode() (uint64, error) {
-	const counterKey = "next_inode"
-
-	// Fetch current counter
-	cmd, err := riak.NewFetchValueCommandBuilder().
-		WithBucket(kv.metadataBucket).
-		WithKey(counterKey).
+	cmd, err := riak.NewUpdateCounterCommandBuilder().
+		WithBucketType(kv.counterBucket).
+		WithBucket(kv.counterBucket).
+		WithKey("next_inode").
+		WithIncrement(1).
+		WithReturnBody(true).
 		Build()
 	if err != nil {
-		return 0, fmt.Errorf("failed to build fetch command: %w", err)
+		return 0, fmt.Errorf("failed to build counter command: %w", err)
 	}
 
 	if err := kv.cluster.Execute(cmd); err != nil {
-		return 0, fmt.Errorf("failed to fetch counter: %w", err)
+		return 0, fmt.Errorf("failed to increment counter: %w", err)
 	}
 
-	var nextInode uint64 = 1 // Start at 1 (0 is root)
-	fvc := cmd.(*riak.FetchValueCommand)
-	if fvc.Response != nil && len(fvc.Response.Values) > 0 {
-		// Parse existing counter
-		fmt.Sscanf(string(fvc.Response.Values[0].Value), "%d", &nextInode)
+	ucc := cmd.(*riak.UpdateCounterCommand)
+	if ucc.Response == nil {
+		return 0, fmt.Errorf("no response from counter update")
 	}
 
-	// Increment and store
-	newCounter := nextInode + 1
-	obj := &riak.Object{
-		Bucket:      kv.metadataBucket,
-		Key:         counterKey,
-		ContentType: "text/plain",
-		Value:       []byte(fmt.Sprintf("%d", newCounter)),
-	}
-
-	storeCmd, err := riak.NewStoreValueCommandBuilder().
-		WithBucket(kv.metadataBucket).
-		WithContent(obj).
-		Build()
-	if err != nil {
-		return 0, fmt.Errorf("failed to build store command: %w", err)
-	}
-
-	if err := kv.cluster.Execute(storeCmd); err != nil {
-		return 0, fmt.Errorf("failed to store counter: %w", err)
-	}
-
-	return nextInode, nil
+	// Counter starts at 0, first increment returns 1.
+	// Inode 0 is root (created by InitBackend), so first alloc returns 1.
+	return uint64(ucc.Response.CounterValue), nil
 }
 
 // CRUD ops for Chunks
@@ -267,6 +242,7 @@ func (kv *KVStore) PutChunk(hash []byte, data []byte) error {
 	}
 
 	cmd, err := riak.NewStoreValueCommandBuilder().
+		WithBucketType(kv.chunkBucket).
 		WithBucket(kv.chunkBucket).
 		WithContent(obj).
 		Build()
@@ -283,6 +259,7 @@ func (kv *KVStore) PutChunk(hash []byte, data []byte) error {
 // GetChunk retrieves a chunk by its FNV hash
 func (kv *KVStore) GetChunk(hash []byte) ([]byte, error) {
 	cmd, err := riak.NewFetchValueCommandBuilder().
+		WithBucketType(kv.chunkBucket).
 		WithBucket(kv.chunkBucket).
 		WithKey(fmt.Sprintf("%x", hash)).
 		Build()
@@ -305,6 +282,7 @@ func (kv *KVStore) GetChunk(hash []byte) ([]byte, error) {
 // DeleteChunk deletes a chunk by its FNV hash
 func (kv *KVStore) DeleteChunk(hash []byte) error {
 	cmd, err := riak.NewDeleteValueCommandBuilder().
+		WithBucketType(kv.chunkBucket).
 		WithBucket(kv.chunkBucket).
 		WithKey(fmt.Sprintf("%x", hash)).
 		Build()
@@ -329,12 +307,12 @@ func (kv *KVStore) WipeBackend() error {
 	}
 
 	// Delete all metadata
-	if err := kv.wipeBucket(kv.metadataBucket); err != nil {
+	if err := kv.wipeBucket(kv.metadataBucket, kv.metadataBucket); err != nil {
 		return fmt.Errorf("failed to wipe metadata bucket: %w", err)
 	}
 
 	// Delete all chunks
-	if err := kv.wipeBucket(kv.chunkBucket); err != nil {
+	if err := kv.wipeBucket(kv.chunkBucket, kv.chunkBucket); err != nil {
 		return fmt.Errorf("failed to wipe chunk bucket: %w", err)
 	}
 
@@ -342,9 +320,10 @@ func (kv *KVStore) WipeBackend() error {
 }
 
 // wipeBucket deletes all keys in a bucket
-func (kv *KVStore) wipeBucket(bucket string) error {
+func (kv *KVStore) wipeBucket(bucketType, bucket string) error {
 	// List all keys in the bucket
 	cmd, err := riak.NewListKeysCommandBuilder().
+		WithBucketType(bucketType).
 		WithBucket(bucket).
 		WithStreaming(false).
 		Build()
@@ -364,6 +343,7 @@ func (kv *KVStore) wipeBucket(bucket string) error {
 	// Delete each key
 	for _, key := range lkc.Response.Keys {
 		delCmd, err := riak.NewDeleteValueCommandBuilder().
+			WithBucketType(bucketType).
 			WithBucket(bucket).
 			WithKey(string(key)).
 			Build()
@@ -391,39 +371,36 @@ riak-admin bucket-type activate %s
 riak-admin bucket-type create %s '{"props":{"n_val":4,"w":3,"r":1}}'
 riak-admin bucket-type activate %s
 
+# Counter bucket: CRDT counter for inode allocation
+riak-admin bucket-type create %s '{"props":{"datatype":"counter"}}'
+riak-admin bucket-type activate %s
+
 Then use buckets:
   metadata: %s (metadata)
   chunks:   %s (chunks)
+  counters: %s (inode allocation)
   host:     %s:%d`,
 		kv.metadataBucket, kv.metadataBucket,
 		kv.chunkBucket, kv.chunkBucket,
+		kv.counterBucket, kv.counterBucket,
 
 		kv.metadataBucket,
 		kv.chunkBucket,
-		kv.host, kv.port)
+		kv.counterBucket,
+		kv.host, kv.pb_port)
 }
 
 // InitBackend initializes backend buckets with appropriate settings
 // DESIGN DECISION for reliability (tradeoffs):
 // - chunk bucket: if N=4, then R=1, W=3 (fast reads, durable writes)
 // - metadata bucket: strong consistency enabled
-//
-// Note: Bucket properties should be configured via Riak admin bucket types:
-//
-//	# Metadata bucket: strong consistency enabled
-//	riak-admin bucket-type create bangfs_meta '{"props":{"consistent":true}}'
-//	riak-admin bucket-type activate bangfs_meta
-//
-//	# Chunk bucket: eventual consistency, optimized for reads
-//	riak-admin bucket-type create bangfs_chunks '{"props":{"n_val":4,"w":3,"r":1}}'
-//	riak-admin bucket-type activate bangfs_chunks
 func (kv *KVStore) InitBackend() error {
 	if kv.cluster == nil {
-		return fmt.Errorf("cluster not connected to %s:%d", kv.host, kv.port)
+		return fmt.Errorf("cluster not connected to %s:%d", kv.host, kv.pb_port)
 	}
 
 	// Check if filesystem already exists (inode 0 present)
-	existing, err := kv.Metadata(0)
+	existing, _, err := kv.Metadata(0)
 	if err == nil && existing != nil {
 		return fmt.Errorf("filesystem already exists (inode 0 found in bucket %s). Use WipeBackend() first to reinitialize", kv.metadataBucket)
 	}
@@ -449,7 +426,7 @@ func (kv *KVStore) InitBackend() error {
 		},
 	}
 
-	if err := kv.PutMetadata(0, nil, rootDir); err != nil {
+	if err := kv.PutMetadata(0, rootDir); err != nil {
 		return fmt.Errorf("failed to create root inode: %w\n\n%s", err, kv.SetupInstructions())
 	}
 

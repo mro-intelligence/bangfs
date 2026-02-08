@@ -27,15 +27,15 @@ func envPortOrDefault(key string, fallback uint) uint {
 }
 
 func main() {
-	host := flag.String("host", envOrDefault("BANGFS_HOST", ""), "Riak host (env: BANGFS_HOST)")
-	port := flag.Uint("port", envPortOrDefault("BANGFS_PORT", 8087), "Riak port (env: BANGFS_PORT)")
+	host := flag.String("host", envOrDefault("RIAK_HOST", ""), "Riak host (env: RIAK_HOST)")
+	port := flag.Uint("port", envPortOrDefault("RIAK_PORT", 8087), "Riak port (env: RIAK_PORT)")
 	namespace := flag.String("namespace", envOrDefault("BANGFS_NAMESPACE", ""), "Filesystem namespace (env: BANGFS_NAMESPACE)")
 
 	flag.Parse()
 
 	// Validate required args
 	if *host == "" || *namespace == "" {
-		log.Println("Error: -host and -namespace are required (or set BANGFS_HOST, BANGFS_NAMESPACE)")
+		log.Println("Error: -host and -namespace are required (or set RIAK_HOST, BANGFS_NAMESPACE)")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -57,5 +57,5 @@ func main() {
 	log.Printf("Filesystem initialized successfully!")
 	log.Printf("  Metadata bucket: %s_bangfs_metadata", *namespace)
 	log.Printf("  Chunk bucket:    %s_bangfs_chunks", *namespace)
-	log.Printf("\nMount with: bangfs -host %s -port %d -namespace %s -mount /your/mountpoint", *host, *port, *namespace)
+	log.Printf("\nMount with: mount-fuse-bangfs -host %s -port %d -namespace %s -mount /your/mountpoint", *host, *port, *namespace)
 }
