@@ -29,9 +29,8 @@ ln -sf /dev/stderr "$LOG_DIR/error.log"
 if [ -f "$RIAK_CONF" ]; then
     sed -i 's/^listener.http.internal = 127.0.0.1:/listener.http.internal = 0.0.0.0:/' "$RIAK_CONF"
     sed -i 's/^listener.protobuf.internal = 127.0.0.1:/listener.protobuf.internal = 0.0.0.0:/' "$RIAK_CONF"
-    # Also update nodename to use container hostname
-    HOSTNAME=$(hostname -f 2>/dev/null || hostname)
-    sed -i "s/^nodename = .*/nodename = riak@${HOSTNAME}/" "$RIAK_CONF"
+    # Use 127.0.0.1 for nodename so Erlang doesn't reject container hostnames
+    sed -i "s/^nodename = .*/nodename = riak@127.0.0.1/" "$RIAK_CONF"
 fi
 
 # Export PATH to include Riak binaries
