@@ -32,7 +32,7 @@ func (d *BangDirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno)
 	inum := d.StableAttr().Ino
 	op := bangutil.GetTracer().Op("Readdir", inum, "")
 
-	dir_meta, _, err := kv.Metadata(inum)
+	dir_meta, _, err := gKVStore.Metadata(inum)
 	if err != nil {
 		op.Error(err)
 		return nil, syscall.EIO
@@ -48,7 +48,7 @@ func (d *BangDirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno)
 		{Name: "..", Ino: dir_meta.ParentInode, Mode: syscall.S_IFDIR},
 	}
 	for _, child := range dir_meta.GetChildEntries() {
-		child_meta, _, err := kv.Metadata(child.Inode)
+		child_meta, _, err := gKVStore.Metadata(child.Inode)
 		if err != nil {
 			op.Error(err)
 			continue // TODO: handle error
@@ -71,7 +71,7 @@ func (d *BangDirNode) Create(ctx context.Context, name string, flags uint32, mod
 	op := bangutil.GetTracer().Op("Create", inum, name)
 
 	// Read the directory children from the backend.
-	dir_meta, dir_vclock, err := kv.Metadata(inum)
+	dir_meta, dir_vclock, err := gKVStore.Metadata(inum)
 	if err != nil {
 		op.Error(fmt.Errorf("getting metadata: %v", err))
 		return nil, nil, 0, syscall.EIO
@@ -85,7 +85,7 @@ func (d *BangDirNode) Create(ctx context.Context, name string, flags uint32, mod
 
 	// Create a new backend metadata struct for the new file and store it in the backend.
 	now := time.Now().UnixNano() // TODO: check why time fields don't use uint64 but int64
-	new_inum := inumgen.NextId()
+	new_inum := gInumgen.NextId()
 	new_file_meta := &bangpb.InodeMeta{
 		Name:        name,
 		ParentInode: inum,
@@ -99,7 +99,7 @@ func (d *BangDirNode) Create(ctx context.Context, name string, flags uint32, mod
 		Nlink:       1,
 	}
 	var new_vclock []byte
-	new_vclock, err = kv.PutMetadata(new_inum, new_file_meta)
+	new_vclock, err = gKVStore.PutMetadata(new_inum, new_file_meta)
 	if err != nil {
 		op.Error(fmt.Errorf("storing the new file metadata: %v", err))
 		return nil, nil, 0, syscall.EIO
@@ -110,7 +110,7 @@ func (d *BangDirNode) Create(ctx context.Context, name string, flags uint32, mod
 	dir_meta.ChildEntries = append(child_entries, &bangpb.ChildEntry{Name: name, Inode: new_inum})
 	dir_meta.MtimeNs = now
 	dir_meta.CtimeNs = now
-	_, err = kv.UpdateMetadata(inum, dir_meta, dir_vclock)
+	_, err = gKVStore.UpdateMetadata(inum, dir_meta, dir_vclock)
 	if err != nil {
 		op.Error(fmt.Errorf("updating metadata for dir inode: %v", err))
 		return nil, nil, 0, syscall.EIO
@@ -134,7 +134,7 @@ func (d *BangDirNode) Mkdir(ctx context.Context, name string, mode uint32, out *
 	op := bangutil.GetTracer().Op("Mkdir", inum, name)
 
 	// Read the directory children from the backend.
-	dir_meta, vclock, err := kv.Metadata(inum)
+	dir_meta, vclock, err := gKVStore.Metadata(inum)
 	if err != nil {
 		op.Error(fmt.Errorf("getting metadata: %v", err))
 		return nil, syscall.EIO
@@ -150,7 +150,7 @@ func (d *BangDirNode) Mkdir(ctx context.Context, name string, mode uint32, out *
 
 	// Create a new backend metadata struct for the new file and store it in the backend.
 	now := time.Now().UnixNano() // TODO: check why time fields don't use uint64 but int64
-	new_inum := inumgen.NextId()
+	new_inum := gInumgen.NextId()
 	new_dir_meta := &bangpb.InodeMeta{
 		Name:         name,
 		ParentInode:  inum,
@@ -163,7 +163,7 @@ func (d *BangDirNode) Mkdir(ctx context.Context, name string, mode uint32, out *
 		ChildEntries: []*bangpb.ChildEntry{},
 		Nlink:        2, // . (self) + entry in parent
 	}
-	_, err = kv.PutMetadata(new_inum, new_dir_meta)
+	_, err = gKVStore.PutMetadata(new_inum, new_dir_meta)
 	if err != nil {
 		op.Error(fmt.Errorf("storing the new dir metadata: %v", err))
 		return nil, syscall.EIO
@@ -175,7 +175,7 @@ func (d *BangDirNode) Mkdir(ctx context.Context, name string, mode uint32, out *
 	dir_meta.MtimeNs = now
 	dir_meta.CtimeNs = now
 	dir_meta.Nlink++ // new subdir's ".." points back to us
-	_, err = kv.UpdateMetadata(inum, dir_meta, vclock)
+	_, err = gKVStore.UpdateMetadata(inum, dir_meta, vclock)
 	if err != nil {
 		op.Error(fmt.Errorf("updating metadata for dir inode: %v", err))
 		return nil, syscall.EIO
@@ -192,7 +192,7 @@ func (d *BangDirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 	op := bangutil.GetTracer().Op("Lookup", inum, name)
 
 	// Read the directory children from the backend.
-	dir_meta, _, err := kv.Metadata(inum)
+	dir_meta, _, err := gKVStore.Metadata(inum)
 	if err != nil {
 		op.Error(fmt.Errorf("getting metadata: %v", err))
 		return nil, syscall.EIO
@@ -204,7 +204,7 @@ func (d *BangDirNode) Lookup(ctx context.Context, name string, out *fuse.EntryOu
 	for _, c := range child_entries {
 		if name == c.Name {
 			found_inum := c.Inode
-			found_meta, _, err := kv.Metadata(found_inum)
+			found_meta, _, err := gKVStore.Metadata(found_inum)
 			if err != nil {
 				op.Error(fmt.Errorf("getting metadata for found inode"))
 				return nil, syscall.EIO
@@ -232,7 +232,7 @@ func (d *BangDirNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	// TODO: check if needed to verify if its a directory
 
 	// Read the directory children from the backend.
-	dir_meta, vclock, err := kv.Metadata(inum)
+	dir_meta, vclock, err := gKVStore.Metadata(inum)
 	if err != nil {
 		op.Error(fmt.Errorf("getting metadata: %v", err))
 		return syscall.EIO
@@ -256,7 +256,7 @@ func (d *BangDirNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	}
 
 	// Check if the directory is empty
-	to_delete_meta, to_delete_vclock, err := kv.Metadata(inum_to_delete)
+	to_delete_meta, to_delete_vclock, err := gKVStore.Metadata(inum_to_delete)
 	if err != nil {
 		op.Error(fmt.Errorf("retrieving child directory metadata: %v", err))
 		return syscall.EIO
@@ -269,13 +269,13 @@ func (d *BangDirNode) Rmdir(ctx context.Context, name string) syscall.Errno {
 	// TODO: correctly modify inode change time here
 	dir_meta.ChildEntries = new_child_entries
 	dir_meta.Nlink-- // removed subdir's ".." no longer points to us
-	_, err = kv.UpdateMetadata(inum, dir_meta, vclock)
+	_, err = gKVStore.UpdateMetadata(inum, dir_meta, vclock)
 	if err != nil {
 		op.Error(fmt.Errorf("updating metadata for dir inode: %v", err))
 		return syscall.EIO
 	}
 
-	if err = kv.DeleteMetadata(inum_to_delete, to_delete_vclock); err != nil {
+	if err = gKVStore.DeleteMetadata(inum_to_delete, to_delete_vclock); err != nil {
 		op.Error(fmt.Errorf("deleting child dir metadata: %v", err))
 	}
 
@@ -289,7 +289,7 @@ func (d *BangDirNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	op := bangutil.GetTracer().Op("Unlink", inum, name)
 
 	// Read the directory children from the backend.
-	dirMeta, vclock, err := kv.Metadata(inum)
+	dirMeta, vclock, err := gKVStore.Metadata(inum)
 	if err != nil {
 		op.Error(fmt.Errorf("getting metadata: %v", err))
 		return syscall.EIO
@@ -318,14 +318,14 @@ func (d *BangDirNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	dirMeta.ChildEntries = updated_child_entries
 	//dirMeta.MtimeNs = now // TODO: check which of these to modify
 	//dirMeta.CtimeNs = now
-	_, err = kv.UpdateMetadata(inum, dirMeta, vclock)
+	_, err = gKVStore.UpdateMetadata(inum, dirMeta, vclock)
 	if err != nil {
 		op.Error(fmt.Errorf("updating metadata for dir inode: %v", err))
 		return syscall.EIO
 	}
 
 	// Look up the file that we unlinked (now orphaned since we dont have hardlinks)
-	unlinked_file_meta, unlinked_file_vclock, err := kv.Metadata(inum_to_delete)
+	unlinked_file_meta, unlinked_file_vclock, err := gKVStore.Metadata(inum_to_delete)
 	if err != nil {
 		op.Error(fmt.Errorf("lookup of unlinked file"))
 		return syscall.EIO
@@ -335,14 +335,14 @@ func (d *BangDirNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	chunkRefs := unlinked_file_meta.Chunks
 	for _, c := range chunkRefs {
 		chunk_key := c.Hash
-		if err = kv.DeleteChunk(chunk_key); err != nil {
+		if err = gKVStore.DeleteChunk(chunk_key); err != nil {
 			op.Error(fmt.Errorf("deleting chunk %v", chunk_key)) // garbage collect later
 		}
 	}
 
 	// Delete the file metadata itself
 	// TODO: make this work even if the file inode changed between reading and deleting it
-	if err = kv.DeleteMetadata(inum_to_delete, unlinked_file_vclock); err != nil {
+	if err = gKVStore.DeleteMetadata(inum_to_delete, unlinked_file_vclock); err != nil {
 		op.Error(fmt.Errorf("deleting file metadata: %v", err))
 	}
 

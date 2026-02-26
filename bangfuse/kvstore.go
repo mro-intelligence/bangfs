@@ -2,6 +2,7 @@ package bangfuse
 
 import (
 	"fmt"
+	"io"
 	"syscall"
 	"time"
 
@@ -22,25 +23,28 @@ type KVStore interface {
 	PutChunk(key uint64, data []byte) error
 	Chunk(key uint64) ([]byte, error)
 	DeleteChunk(key uint64) error
-	WipeBackend() error
+	WipeBackend(w io.Writer) error
 }
+
+const metadataBucket = "metadata"
+const chunkBucket = "chunks"
 
 // RiakKVStore holds a connection to the Riak backend
 type RiakKVStore struct {
-	metadataBucket string
-	chunkBucket    string
-	cluster        *riak.Cluster
-	host           string
-	pb_port        uint16
+	metadataBucketType string
+	chunkBucketType    string
+	cluster            *riak.Cluster
+	host               string
+	pb_port            uint16
 }
 
 // NewRiakKVStore creates a new KVStore instance
 func NewRiakKVStore(host string, port uint16, namespace string) (*RiakKVStore, error) {
 	kv := &RiakKVStore{
-		metadataBucket: namespace + "_bangfs_metadata",
-		chunkBucket:    namespace + "_bangfs_chunks",
-		host:           host,
-		pb_port:        port,
+		metadataBucketType: namespace + "_bangfs_metadata",
+		chunkBucketType:    namespace + "_bangfs_chunks",
+		host:               host,
+		pb_port:            port,
 	}
 	if err := kv.Connect(); err != nil {
 		return kv, err // for latter printing of the values
@@ -89,7 +93,7 @@ func (kv *RiakKVStore) InitBackend() error {
 	// Check if filesystem already exists (inode 0 present)
 	existing, _, err := kv.Metadata(0)
 	if err == nil && existing != nil {
-		return fmt.Errorf("filesystem already exists (inode 0 found in bucket %s). Use WipeBackend() first to reinitialize", kv.metadataBucket)
+		return fmt.Errorf("filesystem already exists (inode 0 found in bucket %s). Use WipeBackend() first to reinitialize", kv.metadataBucketType)
 	}
 
 	// Create root inode (inode 0) as empty directory
@@ -133,18 +137,19 @@ func (kv *RiakKVStore) PutMetadata(key uint64, newMeta *bangpb.InodeMeta) ([]byt
 	}
 
 	obj := &riak.Object{
-		Bucket:      kv.metadataBucket,
-		BucketType:  kv.metadataBucket, // TODO: Check if passing ButcketType is redundant
+		Bucket:      metadataBucket,
+		BucketType:  kv.metadataBucketType, // TODO: Check if passing ButcketType is redundant
 		Key:         fmt.Sprintf("%d", key),
 		ContentType: "application/protobuf",
 		Value:       data,
 	}
 
 	cmd, err := riak.NewStoreValueCommandBuilder().
-		WithBucketType(kv.metadataBucket).
-		WithBucket(kv.metadataBucket).
+		WithBucketType(kv.metadataBucketType).
+		WithBucket(metadataBucket).
 		WithContent(obj).
 		WithIfNoneMatch(true). // Concurrency control here!
+		WithReturnBody(true).  // Need this to get vclock back
 		Build()
 	if err != nil {
 		return nil, fmt.Errorf("failed to build store command: %w", err)
@@ -156,6 +161,9 @@ func (kv *RiakKVStore) PutMetadata(key uint64, newMeta *bangpb.InodeMeta) ([]byt
 
 	svc := cmd.(*riak.StoreValueCommand)
 	vclock := svc.Response.VClock
+	if len(vclock) == 0 {
+		return nil, fmt.Errorf("didn't get vclock")
+	}
 	return vclock, nil
 }
 
@@ -169,7 +177,8 @@ func (kv *RiakKVStore) UpdateMetadata(key uint64, newMeta *bangpb.InodeMeta, vcl
 	}
 
 	obj := &riak.Object{
-		Bucket:      kv.metadataBucket,
+		Bucket:      metadataBucket,
+		BucketType:  kv.metadataBucketType,
 		Key:         fmt.Sprintf("%d", key),
 		ContentType: "application/protobuf",
 		Value:       data,
@@ -177,10 +186,11 @@ func (kv *RiakKVStore) UpdateMetadata(key uint64, newMeta *bangpb.InodeMeta, vcl
 	}
 
 	cmd, err := riak.NewStoreValueCommandBuilder().
-		WithBucketType(kv.metadataBucket).
-		WithBucket(kv.metadataBucket).
+		WithBucketType(kv.metadataBucketType).
+		WithBucket(metadataBucket).
 		WithContent(obj).
 		WithIfNotModified(true). // Concurrency control here!
+		WithReturnBody(true).    // Need this to get vclock back
 		Build()
 	if err != nil {
 		return nil, fmt.Errorf("failed to build store command: %w", err)
@@ -196,8 +206,8 @@ func (kv *RiakKVStore) UpdateMetadata(key uint64, newMeta *bangpb.InodeMeta, vcl
 // GetMeta retrieves inode metadata
 func (kv *RiakKVStore) Metadata(key uint64) (*bangpb.InodeMeta /*vclock*/, []byte, error) {
 	cmd, err := riak.NewFetchValueCommandBuilder().
-		WithBucketType(kv.metadataBucket).
-		WithBucket(kv.metadataBucket).
+		WithBucketType(kv.metadataBucketType).
+		WithBucket(metadataBucket).
 		WithKey(fmt.Sprintf("%d", key)).
 		Build()
 	if err != nil {
@@ -224,8 +234,8 @@ func (kv *RiakKVStore) Metadata(key uint64) (*bangpb.InodeMeta /*vclock*/, []byt
 // Pass the vclock from the last read to ensure no concurrent modification.
 func (kv *RiakKVStore) DeleteMetadata(key uint64, vclockIn []byte) error {
 	builder := riak.NewDeleteValueCommandBuilder().
-		WithBucketType(kv.metadataBucket).
-		WithBucket(kv.metadataBucket).
+		WithBucketType(kv.metadataBucketType).
+		WithBucket(metadataBucket).
 		WithKey(fmt.Sprintf("%d", key))
 	if vclockIn != nil {
 		builder = builder.WithVClock(vclockIn)
@@ -244,15 +254,16 @@ func (kv *RiakKVStore) DeleteMetadata(key uint64, vclockIn []byte) error {
 // PutChunk stores a chunk by its key
 func (kv *RiakKVStore) PutChunk(key uint64, data []byte) error {
 	obj := &riak.Object{
-		Bucket:      kv.chunkBucket,
+		Bucket:      chunkBucket,
+		BucketType:  kv.chunkBucketType,
 		Key:         fmt.Sprintf("%016x", key),
 		ContentType: "application/octet-stream",
 		Value:       data,
 	}
 
 	cmd, err := riak.NewStoreValueCommandBuilder().
-		WithBucketType(kv.chunkBucket).
-		WithBucket(kv.chunkBucket).
+		WithBucketType(kv.chunkBucketType).
+		WithBucket(chunkBucket).
 		WithContent(obj).
 		Build()
 	if err != nil {
@@ -268,8 +279,8 @@ func (kv *RiakKVStore) PutChunk(key uint64, data []byte) error {
 // Chunk retrieves a chunk by its key
 func (kv *RiakKVStore) Chunk(key uint64) ([]byte, error) {
 	cmd, err := riak.NewFetchValueCommandBuilder().
-		WithBucketType(kv.chunkBucket).
-		WithBucket(kv.chunkBucket).
+		WithBucketType(kv.chunkBucketType).
+		WithBucket(chunkBucket).
 		WithKey(fmt.Sprintf("%016x", key)).
 		Build()
 	if err != nil {
@@ -291,8 +302,8 @@ func (kv *RiakKVStore) Chunk(key uint64) ([]byte, error) {
 // DeleteChunk deletes a chunk by its key
 func (kv *RiakKVStore) DeleteChunk(key uint64) error {
 	cmd, err := riak.NewDeleteValueCommandBuilder().
-		WithBucketType(kv.chunkBucket).
-		WithBucket(kv.chunkBucket).
+		WithBucketType(kv.chunkBucketType).
+		WithBucket(chunkBucket).
 		WithKey(fmt.Sprintf("%016x", key)).
 		Build()
 	if err != nil {
@@ -305,27 +316,32 @@ func (kv *RiakKVStore) DeleteChunk(key uint64) error {
 	return nil
 }
 
-// WipeBackend deletes all metadata and chunks from the backend
-func (kv *RiakKVStore) WipeBackend() error {
+// WipeBackend deletes all metadata and chunks from the backend.
+// Progress is written to w (pass io.Discard or os.Stderr).
+func (kv *RiakKVStore) WipeBackend(w io.Writer) error {
 	if kv.cluster == nil {
 		return fmt.Errorf("cluster not connected")
 	}
 
-	// Delete all metadata
-	if err := kv.wipeBucket(kv.metadataBucket, kv.metadataBucket); err != nil {
+	fmt.Fprintf(w, "  wiping metadata [%s/%s]...\n", kv.metadataBucketType, metadataBucket)
+	num_meta_keys, err := kv.wipeBucket(w, kv.metadataBucketType, metadataBucket)
+	if err != nil {
 		return fmt.Errorf("failed to wipe metadata bucket: %w", err)
 	}
+	fmt.Fprintf(w, "  deleted %d metadata keys\n", num_meta_keys)
 
-	// Delete all chunks
-	if err := kv.wipeBucket(kv.chunkBucket, kv.chunkBucket); err != nil {
+	fmt.Fprintf(w, "  wiping chunks [%s/%s]...\n", kv.chunkBucketType, chunkBucket)
+	num_chunk_keys, err := kv.wipeBucket(w, kv.chunkBucketType, chunkBucket)
+	if err != nil {
 		return fmt.Errorf("failed to wipe chunk bucket: %w", err)
 	}
+	fmt.Fprintf(w, "  deleted %d chunk keys\n", num_chunk_keys)
 
 	return nil
 }
 
 // wipeBucket deletes all keys in a bucket
-func (kv *RiakKVStore) wipeBucket(bucketType, bucket string) error {
+func (kv *RiakKVStore) wipeBucket(w io.Writer, bucketType, bucket string) (int, error) {
 
 	// List all keys in the bucket
 	cmd, err := riak.NewListKeysCommandBuilder().
@@ -334,17 +350,20 @@ func (kv *RiakKVStore) wipeBucket(bucketType, bucket string) error {
 		WithStreaming(false).
 		Build()
 	if err != nil {
-		return fmt.Errorf("failed to build list keys command: %w", err)
+		return 0, fmt.Errorf("failed to build list keys command: %w", err)
 	}
 
 	if err := kv.cluster.Execute(cmd); err != nil {
-		return fmt.Errorf("failed to list keys: %w", err)
+		return 0, fmt.Errorf("failed to list keys: %w", err)
 	}
 
 	lkc := cmd.(*riak.ListKeysCommand)
 	if lkc.Response == nil {
-		return fmt.Errorf("no keys found in bucket: %v", bucket)
+		return 0, fmt.Errorf("no keys found in bucket: %v", bucket)
 	}
+
+	total := len(lkc.Response.Keys)
+	fmt.Fprintf(w, "  found %d keys in %s/%s\n", total, bucketType, bucket)
 
 	// Delete each key
 	keycount := 0
@@ -355,14 +374,14 @@ func (kv *RiakKVStore) wipeBucket(bucketType, bucket string) error {
 			WithKey(string(key)).
 			Build()
 		if err != nil {
-			return fmt.Errorf("failed to build delete command for key %s: %w", key, err)
+			return 0, fmt.Errorf("failed to build delete command for key %s: %w", key, err)
 		}
 
 		if err := kv.cluster.Execute(del_cmd); err != nil {
-			return fmt.Errorf("failed to delete key %s: %w", key, err)
+			return 0, fmt.Errorf("failed to delete key %s: %w", key, err)
 		}
 		keycount++
 	}
 
-	return nil
+	return keycount, nil
 }

@@ -86,7 +86,7 @@ func main() {
 
 	// Wipe filesystem data
 	log.Printf("Wiping filesystem with namespace '%s'...", *namespace)
-	if err := kv.WipeBackend(); err != nil {
+	if err := kv.WipeBackend(os.Stderr); err != nil {
 		log.Fatalf("Failed to wipe filesystem: %v", err)
 	}
 
