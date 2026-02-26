@@ -2,36 +2,51 @@
 
 ## Motivation
 
-Build a novel distributed filesystem out of available parts, insipired by GFS.
-Intended to test distributed systems concepts.
+- Build a novel distributed filesystem out of available parts, insipired by GFS.
+- Experimental, intended to test distributed systems concepts.
+- For read-oriented storage, ie, backups, data.
+- Minimal components exposed: Only a key value store and a FUSE client program 
+  - (And a file system checker...and... this is the motivation, not the end result)
+- Ultimately may be useful for utilizing free disk space across heterogenous machines
 
-## Design Goals
+## High Level Goals
 
-- Be as homogenous as possible, avoid explicit 'leader-follower' patterns and use as few different services as possible: depends on only client programs, a backend key value store, and consistency properties of the key value store.
+- Use a single off the shelf key value store service for all data and metadata
+  - file data is stored in chunks, addressed by sequence number, and writes are eventually consistent
+  - metadata is strongly consistent (reads are guaranteed to see all previous writes): acheive this by enabling a *strongly consistent* property on these keys
+- Avoid explicit 'leader-follower' patterns
+- Try not to run any other services (coordinators, monitors, metadata servers, managers...)
 - Be scaleable, in theory as much as the key value store can handle.
-- Handle concurrent writes with optimistic concurrency control (CAS operations), without any explicit locking mechanisem, but don't design for many concurrent writers: writes that would result in an inconsistent state may fail.
-- Be useable at least at small scale, with latency and performance characteristics at least as good as spinning disks.
+- Handle concurrent writes with optimistic concurrency control (CAS operations)
 
-## High Level Concept
+## Tradeoffs: 
+- metadata consistent -> writes to metadata are slower than to file data due to consensus algorithm
+- file data eventually consistent -> writes are faster than to metadata
+- If a read operation occurs soon after a write, this difference means there is no guarantee that  file chunks listed in the internal inode metadata will have completed writing. Accept this and possibly other edge cases.
 
-- store chunks of files in a distributed, eventually consistent, key value store.
-- store file metadata in a key value store with a *strong consistency* property enabled on only the metadata keys.
-- trade offs: 
-  - metadata (inode data) will be consistent with itself, indeed *strongly consistent*, but with some performance cost since the consistency property in distributed systems often requires a distributed consensus algorithm to be used.
-  - file data will be eventually consistent. with some performance benefit when writing file contents, as compared to metadata updates. 
-  - If a read operation occurs soon after a write, eventual consistency means that there will be no guarantee that file chunks listed in the internal inode metadata will exist. Unlike the metatdata theres no guarantee when writes to file chunks will be visible to a read operation.
+## Low Level Design
 
-## Design issues/shortcomings/TODOS
+ - Use [Riak](https://docs.riak.com/riak/kv/latest/index.html) as the key/value store. (this is a POC which is not intended to be a production system and should work with any decent key value store.)
+ - The key value store is abstracted with a Go interface so it will be easy to create a different backend implementation if this is ever useful (eg, DynamaDB, ScyllaDB).
+
+## Design issues and shortcomings
 
 _Probably nobody would actually build a production system this way._ 
 
-- There are many distributed filesystems out there, but few (none that I could find with a web search) use a key value store for both metadata and file data.
-- This is not necessarily a bad thing. It speaks also to organizational dynamics, design requirements and established solutions already being out there, that are maintained by teams of people.
+- There are many distributed filesystems out there, but few (none that I could find with a web search) use a key value store for both metadata and file data: This is not necessarily a bad thing. It speaks also to organizational dynamics, design requirements and established solutions already being out there. The concept for this filesystem was thought up literally overnight.
+- The strongly consistent bucket type propery in Riak, which the implementaion depends upon, is listed as "experimental" in the Riak 2.2.3 documentation.
+- 
 
 ## Status
 
-`make test` builds successfully and (hermetic/unit) tests pass.
-`make test` builds successfully and (hermetic/unit) tests pass.
+- `make test` builds successfully and (hermetic/unit) tests pass.
+- `make integration-test` also builds successfully against a single, non-distributed Riak KVStore instance.
+- `mkfs-bangfs && mount-fuse-bangfs` create and mount the fs, its visible in the `$BANGFS_MOUNTDIR`. (See below for environment var setup.)
+
+## TODOS
+
+- Multiple
+- 
 
 ## Requirements
 
@@ -42,7 +57,13 @@ _Probably nobody would actually build a production system this way._
 
 Produces three binaries: `mkfs-bangfs`, `mount-fuse-bangfs`, `reformat-bangfs`.
 
-## Environment Variables 
+## Testing
+
+As well as go unit test, this target calls a python script to test basic filesystem operations like reading/writing, creating files, etc.
+
+### Environment Variables
+
+Set these environment variables before testing (accepted by the scripts and binaries):
 
 - `RIAK_HOST` — Riak protobuf host address (default: `127.0.0.1` in scripts)
 - `RIAK_PORT` — Riak protobuf port (default: `8087`)
@@ -53,10 +74,6 @@ Produces three binaries: `mkfs-bangfs`, `mount-fuse-bangfs`, `reformat-bangfs`.
 - `RIAK_CONTAINER` — Docker container name for Riak (default: `bangtest`)
 
 All three binaries also accept equivalent CLI flags (`-host`, `-port`, `-namespace`, `-mount`).
-
-## Testing
-
-As well as go unit test, this target calls a python script to test basic filesystem operations like reading/writing, creating files, etc.
 
 ### Unit test
 
@@ -77,11 +94,13 @@ You'll need a docker container that has riak - set the `RIAK_IMAGE` env var. Sta
 ./start-riak-docker.sh
 ./init-riak-buckets-docker.sh
 ````
+
   Should help. You can also run:
 
 ```bash
 ./test-riak-rest.sh
 ```
+
 To make sure the docker riak instance is serving requests.
 
 #### Running the integration test
