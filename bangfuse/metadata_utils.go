@@ -28,6 +28,8 @@ func MetadataToFuseAttr(inum uint64, meta *pb.InodeMeta, out *fuse.Attr) {
 	out.Mtimensec = uint32(meta.MtimeNs % 1e9)
 	out.Ctime = uint64(meta.CtimeNs / 1e9)
 	out.Ctimensec = uint32(meta.CtimeNs % 1e9)
+	out.Blksize = gChunksize // 100x speedup with Riak backend (ad-hoc test)
+	out.Blocks = uint64(len(meta.Chunks))
 }
 
 // IsDir returns true if the metadata represents a directory.

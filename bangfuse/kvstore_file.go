@@ -3,6 +3,7 @@ package bangfuse
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -165,12 +166,10 @@ func (kv *FileKVStore) UpdateMetadata(key uint64, newMeta *bangpb.InodeMeta, vcl
 	if err != nil {
 		return nil, fmt.Errorf("key not found: %d", key)
 	}
-	if len(vclockIn) == 8 && len(current) == 8 {
-		want := binary.LittleEndian.Uint64(vclockIn)
-		have := binary.LittleEndian.Uint64(current)
-		if want != have {
-			return nil, fmt.Errorf("vclock mismatch: expected %d, got %d (concurrent modification)", want, have)
-		}
+	want := binary.LittleEndian.Uint64(vclockIn)
+	have := binary.LittleEndian.Uint64(current)
+	if want != have {
+		return nil, fmt.Errorf("vclock mismatch: expected %d, got %d (concurrent modification)", want, have)
 	}
 
 	data, err := proto.Marshal(newMeta)
@@ -236,7 +235,7 @@ func (kv *FileKVStore) DeleteChunk(key uint64) error {
 }
 
 // WipeBackend deletes all keys (files) in the metadata and chunk directories.
-func (kv *FileKVStore) WipeBackend() error {
+func (kv *FileKVStore) WipeBackend(w io.Writer) error {
 	for _, dir := range []string{kv.metadataDir, kv.chunkDir} {
 		if !strings.HasPrefix(dir, "/tmp/") {
 			return fmt.Errorf("refusing to wipe %q: not under /tmp", kv.baseDir)
@@ -244,10 +243,12 @@ func (kv *FileKVStore) WipeBackend() error {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			if os.IsNotExist(err) {
+				fmt.Fprintf(w, "  %s: not found, skipping\n", dir)
 				continue
 			}
 			return fmt.Errorf("failed to read dir %s: %w", dir, err)
 		}
+		fmt.Fprintf(w, "  wiping %s (%d keys)...\n", dir, len(entries))
 		for _, e := range entries {
 			if err := os.Remove(filepath.Join(dir, e.Name())); err != nil {
 				return fmt.Errorf("failed to delete %s: %w", e.Name(), err)

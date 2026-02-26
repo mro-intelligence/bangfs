@@ -31,17 +31,17 @@ clean:
 install-tools:
 	go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
 
-test: build unit-test
+test: unit-test
 
 test-all: test integration-test
 
 # Unit tests (no external deps, uses FileKVStore)
-unit-test:
+unit-test: build
 	go test -v ./bangfuse/
 	cd test && python3 test_bangfs.py --dummy
 
 # Integration tests (requires running Riak instance)
 # Set RIAK_HOST, RIAK_PORT, BANGFS_NAMESPACE env vars or use defaults
-integration-test:
-	go test -tags=integration -v ./bangfuse/
+integration-test: build
+	go test ./bangfuse/ -v -integration
 	cd test && python3 test_bangfs.py

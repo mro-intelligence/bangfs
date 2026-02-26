@@ -857,7 +857,7 @@ class TraceReader:
 
     def _print_buffer(self):
         for line in self.buffer:
-            print(f"       {DIM}{line}{RESET}")
+            print(f"{DIM}{line}{RESET}")
         self.buffer.clear()
 
 
@@ -1040,7 +1040,10 @@ class BangFSSetup:
         ])
         if result.returncode != 0:
             self.log_warn("No existing filesystem to wipe (or wipe failed)")
-
+        for line in result.stderr.split('\n'):
+            if line != "":
+               self.log_info(f"{DIM}l{line}{RESET}")
+            
     def create_filesystem(self):
         """Create a new filesystem in the backend"""
         self.log_info(f"Creating filesystem (namespace={self.namespace})...")
@@ -1134,13 +1137,15 @@ def run_preflight(mount: str) -> bool:
 
 def _phase_matches(phase_name: str, phase_filter: str) -> bool:
     """Check if a phase name matches the filter. Filter can be comma-separated."""
+    import re
     if not phase_filter:
         return True
     for term in phase_filter.split(","):
         term = term.strip()
         if not term:
             continue
-        if term.lower() in phase_name.lower():
+        # This is overly elaborate
+        if term.lower() == phase_name.strip().lower() or re.search(fr' {term}:', phase_name):
             return True
     return False
 

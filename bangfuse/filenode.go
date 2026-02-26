@@ -60,7 +60,7 @@ func (bf *BangFileNode) Getattr(ctx context.Context, _ fs.FileHandle, out_attr *
 	inum := bf.Inode.StableAttr().Ino
 	op := bangutil.GetTracer().Op("Getattr", inum, "")
 
-	meta, _, err := kv.Metadata(inum)
+	meta, _, err := gKVStore.Metadata(inum)
 	if err != nil {
 		op.Error(err)
 		return syscall.EIO
@@ -78,7 +78,7 @@ func (bf *BangFileNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.
 	op := bangutil.GetTracer().Op(fmt.Sprintf("Setattr (%v) (fh: %v)", debugSetAttrIn(in), fh), inum, "")
 
 	// Read the backend metadata
-	meta, fvclock, err := kv.Metadata(inum)
+	meta, fvclock, err := gKVStore.Metadata(inum)
 	if err != nil {
 		op.Error(err)
 		return syscall.EIO
@@ -137,14 +137,14 @@ func (bf *BangFileNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.
 			new_chunk_size := uint32(sz - chunk_start)
 			if new_chunk_size < chkrefs[last_idx].Size {
 				// Read the chunk, truncate it, write it back
-				data, err := kv.Chunk(chkrefs[last_idx].Hash)
+				data, err := gKVStore.Chunk(chkrefs[last_idx].Hash)
 				if err != nil {
 					op.Errorf("reading chunk %d for truncate: %v", last_idx, err)
 					return syscall.EIO
 				}
 				truncated := data[:new_chunk_size]
-				new_chunk_key := chunkidgen.NextId()
-				if err := kv.PutChunk(new_chunk_key, truncated); err != nil {
+				new_chunk_key := gChunkidgen.NextId()
+				if err := gKVStore.PutChunk(new_chunk_key, truncated); err != nil {
 					op.Errorf("writing truncated chunk: %v", err)
 					return syscall.EIO
 				}
@@ -171,7 +171,7 @@ func (bf *BangFileNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.
 
 	// Write the data back to the backend
 	// NOTE: on vclock conflict, the newly-written truncated chunk may be orphaned
-	_, err = kv.UpdateMetadata(inum, meta, fvclock)
+	_, err = gKVStore.UpdateMetadata(inum, meta, fvclock)
 	if err != nil {
 		op.Error(err)
 		return syscall.EIO
@@ -179,7 +179,7 @@ func (bf *BangFileNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.
 
 	// Delete stale chunks only after metadata was successfully written
 	for _, key := range stale_chunk_keys {
-		if err := kv.DeleteChunk(key); err != nil {
+		if err := gKVStore.DeleteChunk(key); err != nil {
 			op.Debugf("failed to delete stale chunk %d: %v", key, err)
 		}
 	}
@@ -198,7 +198,7 @@ func (bf *BangFileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, 
 	inum := bf.Inode.StableAttr().Ino
 	op := bangutil.GetTracer().Op("Open", inum, "")
 
-	meta, vclock, err := kv.Metadata(inum)
+	meta, vclock, err := gKVStore.Metadata(inum)
 	if err != nil {
 		op.Error(err)
 		return nil, 0, syscall.EIO

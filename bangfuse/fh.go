@@ -44,8 +44,8 @@ func (f *BangFH) replaceChunk(ctx context.Context, idx int, data []byte) error {
 		return syscall.EIO
 	}
 
-	key := chunkidgen.NextId()
-	err := kv.PutChunk(key, data)
+	key := gChunkidgen.NextId()
+	err := gKVStore.PutChunk(key, data)
 	if err != nil {
 		op.Error(err)
 		return err
@@ -55,12 +55,6 @@ func (f *BangFH) replaceChunk(ctx context.Context, idx int, data []byte) error {
 	chks[idx].Size = uint32(len(data))
 
 	f.Metadata.Chunks = chks
-
-	if err = f.writeMeta(ctx); err != nil {
-		// TODO: decide if to undo the metadata or resync it
-		op.Error(err)
-		return err
-	}
 	op.Done()
 	return nil
 }
@@ -76,7 +70,7 @@ func (f *BangFH) readChunk(ctx context.Context, idx int) ([]byte, error) {
 		return nil, err
 	}
 	key := chks[idx].Hash
-	data, err := kv.Chunk(key)
+	data, err := gKVStore.Chunk(key)
 	if err != nil {
 		op.Error(err)
 		return nil, err
@@ -85,14 +79,14 @@ func (f *BangFH) readChunk(ctx context.Context, idx int) ([]byte, error) {
 	return data, nil
 }
 
-// appendChunk appends a new chunk to the file and writes the data to the backend
+// appendChunk appends a new chunk to the file but defers writing metadata
 func (f *BangFH) appendChunk(ctx context.Context, data []byte) error {
 	op := bangutil.GetTracer().Op("appendChunk", f.Inum, f.Metadata.Name)
 
 	chunkrefs := f.Metadata.Chunks
 
-	key := chunkidgen.NextId()
-	err := kv.PutChunk(key, data)
+	key := gChunkidgen.NextId()
+	err := gKVStore.PutChunk(key, data)
 	if err != nil {
 		op.Error(err)
 		return err
@@ -100,10 +94,7 @@ func (f *BangFH) appendChunk(ctx context.Context, data []byte) error {
 	// TODO: decide if to undo the metadata or resync it if this fails
 	chunkrefs = append(chunkrefs, &bangpb.ChunkRef{Hash: key, Size: uint32(len(data))})
 	f.Metadata.Chunks = chunkrefs
-	if err := f.writeMeta(ctx); err != nil {
-		op.Error(err)
-		return err
-	}
+
 	op.Done()
 	return nil
 }
@@ -111,17 +102,17 @@ func (f *BangFH) appendChunk(ctx context.Context, data []byte) error {
 // writeMeta writes the metadata to KV and updates the vclock
 func (f *BangFH) writeMeta(ctx context.Context) error {
 	op := bangutil.GetTracer().Op("writeMeta", f.Inum, f.Metadata.Name)
-	op.Debugf("Write metadata for inode %d", f.Inum)
+	op.Debugf("Write metadata for inode %d, vclock: %v", f.Inum, f.VClock)
 
-	vclock, err := kv.UpdateMetadata(f.Inum, f.Metadata, f.VClock)
+	new_vclock, err := gKVStore.UpdateMetadata(f.Inum, f.Metadata, f.VClock)
 	if err != nil {
 		op.Error(err)
 		// Don't reload the vclock, since our metadata is still stale
 		return err
 	}
 
-	op.Debugf("Metadata updated for inode %d", f.Inum)
-	f.VClock = vclock // Our metadata should be in sync with what was written
+	f.VClock = new_vclock // Our metadata should be in sync with what was written
+	op.Debugf("Metadata updated for inode %d, new vclcok: %v", f.Inum, f.VClock)
 	op.Done()
 	return nil
 }
@@ -131,22 +122,22 @@ func (f *BangFH) resyncMetadata(ctx context.Context) error {
 	op := bangutil.GetTracer().Op("resyncMetadata", f.Inum, f.Metadata.Name)
 	op.Debugf("Resync metadata for inode %d", f.Inum)
 
-	metadata, vclock, err := kv.Metadata(f.Inum)
+	metadata, new_vclock, err := gKVStore.Metadata(f.Inum)
 	if err != nil {
 		op.Error(err)
 		return err
 	}
 
-	op.Debugf("Metadata resynced for inode %d", f.Inum)
-	f.VClock = vclock
+	f.VClock = new_vclock
 	f.Metadata = metadata
+	op.Debugf("Metadata resynced for inode %d, new vclcok: %v", f.Inum, f.VClock)
 	op.Done()
 	return nil
 }
 
 // writeAt splices data into the file at the given offset, modifying existing
 // chunks and appending new ones as needed.
-// All chunks except the last are exactly chunksize bytes, so we use division
+// All chunks except the last are exactly gChunksize bytes, so we use division
 // to index directly instead of walking.
 func (f *BangFH) writeAt(ctx context.Context, op *bangutil.TraceOp, data []byte, off int64) syscall.Errno {
 	chks := f.Metadata.Chunks
@@ -154,8 +145,8 @@ func (f *BangFH) writeAt(ctx context.Context, op *bangutil.TraceOp, data []byte,
 	data_pos := 0 // how far into data we've consumed
 
 	for data_pos < len(data) {
-		chunk_idx := int(pos / int64(chunksize))
-		offset_in_chunk := int(pos % int64(chunksize))
+		chunk_idx := int(pos / int64(gChunksize))
+		offset_in_chunk := int(pos % int64(gChunksize))
 
 		if chunk_idx < len(chks) {
 			// Overwrite within an existing chunk
@@ -165,9 +156,9 @@ func (f *BangFH) writeAt(ctx context.Context, op *bangutil.TraceOp, data []byte,
 				return syscall.EIO
 			}
 			// Extend the chunk buffer if the write goes past its current size
-			// (can happen on the last chunk which may be shorter than chunksize)
-			if offset_in_chunk+len(data)-data_pos > len(existing) && len(existing) < int(chunksize) {
-				grown := make([]byte, min(int(chunksize), offset_in_chunk+len(data)-data_pos))
+			// (can happen on the last chunk which may be shorter than gChunksize)
+			if offset_in_chunk+len(data)-data_pos > len(existing) && len(existing) < int(gChunksize) {
+				grown := make([]byte, min(int(gChunksize), offset_in_chunk+len(data)-data_pos))
 				copy(grown, existing)
 				existing = grown
 			}
@@ -181,7 +172,7 @@ func (f *BangFH) writeAt(ctx context.Context, op *bangutil.TraceOp, data []byte,
 		} else {
 			// Past the last chunk — append new ones
 			remaining := len(data) - data_pos
-			n := min(uint32(remaining), chunksize)
+			n := min(uint32(remaining), gChunksize)
 			if err := f.appendChunk(ctx, data[data_pos:data_pos+int(n)]); err != nil {
 				op.Errorf("appendChunk: %v", err)
 				return syscall.EIO
@@ -236,8 +227,9 @@ func (f *BangFH) Write(ctx context.Context, data []byte, off int64) (uint32, sys
 	if write_end > filesize {
 		f.Metadata.Size = uint64(write_end)
 	}
+
 	if err := f.writeMeta(ctx); err != nil {
-		op.Error(fmt.Errorf("syncing size: %v", err))
+		op.Error(fmt.Errorf("syncing metadata (chunks and size): %v", err))
 		return 0, syscall.EIO
 	}
 

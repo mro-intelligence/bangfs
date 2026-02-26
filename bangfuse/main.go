@@ -12,14 +12,14 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 )
 
-// kv is the package-level KVStore used by node implementations.
+// gKVStore is the package-level KVStore used by node implementations.
 // assumes that a given process will only mount one fs!
 // TODO: move into the root inode and access with .Root()
-var kv KVStore
-var inumgen *IdGenerator
-var chunkidgen *IdGenerator
+var gKVStore KVStore
+var gInumgen *IdGenerator
+var gChunkidgen *IdGenerator
 
-const chunksize = 1024 * 8
+const gChunksize = 1024 * 1024 // 1MB
 
 // BangServer wraps a FUSE server and its backend KV connection.
 type BangServer struct {
@@ -49,15 +49,28 @@ func NewBangServerWithKV(kvStore KVStore) (*BangServer, error) {
 
 // Mount mounts a BangFS filesystem at the given mountpoint.
 func (bs *BangServer) Mount(mountpoint string) error {
-	kv = bs.kv
-	inumgen = NewIdGenerator()
-	chunkidgen = NewIdGenerator()
+	gKVStore = bs.kv
+	gInumgen = NewIdGenerator()
+	gChunkidgen = NewIdGenerator()
 
 	root := &BangDirNode{}
 	server, err := fs.Mount(mountpoint, root, &fs.Options{
 		MountOptions: fuse.MountOptions{
-			FsName: "bangfs",
-			Name:   "bangfs",
+			FsName:      "bangfs",
+			Name:        "bangfs",
+			EnableLocks: false, // Locks not implemented
+			//Debug:          true,
+			SingleThreaded: false,
+			//In Linux 4.20 and later, the value
+			//   can go up to 1 MiB and go-fuse calculates the MaxPages value acc.
+			//   to MaxWrite, rounding up.
+			MaxWrite:      gChunksize,
+			DisableXAttrs: true,
+			Logger:        nil,
+
+			// If set, ask kernel not to do automatic data cache invalidation.
+			// The filesystem is fully responsible for invalidating data cache.
+			//ExplicitDataCacheControl false,
 		},
 		RootStableAttr: &fs.StableAttr{
 			Mode: syscall.S_IFDIR,
