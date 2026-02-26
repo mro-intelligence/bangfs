@@ -1,0 +1,18 @@
+# Generated protobuf code
+proto/*.pb.go
+
+# Go build artifacts
+bangfs-*
+*.exe
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Misc
+**/__pycache__
+*-bangfs
