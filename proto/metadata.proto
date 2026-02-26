@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+package bangfs;
+
+option go_package = "bangfs/proto";
+
+// ChunkRef references a chunk within a file
+message ChunkRef {
+    // uint32 index = 1;       // position in file (0-indexed)
+    uint64 hash = 2;         // fnv hash of chunk content (chunk ID)
+    uint32 size = 3;        // actual size of this chunk
+}
+
+// Wrapper messages for oneof (repeated fields not allowed directly in oneof)
+//message ChunkList {
+//    repeated ChunkRef chunk_entries = 1;
+//}
+
+message ChildEntry {
+    string name = 1;
+    uint64 inode = 2;
+}
+
+// InodeMeta represents metadata for a file or directory.
+// The mode field (S_IFDIR / S_IFREG) determines the type.
+// NOTE: inode number is NOT stored here - it's the key in the KV store.
+message InodeMeta {
+    string name = 1;
+    uint64 parent_inode = 2;
+
+    // Attributes (POSIX-like) — mode includes file type bits (S_IFDIR, S_IFREG)
+    uint32 mode = 3;
+    uint32 uid = 4;
+    uint32 gid = 5;
+    uint64 size = 6;            // files only
+
+    // Timestamps (nanoseconds since epoch)
+    int64 ctime_ns = 7;
+    int64 mtime_ns = 8;
+    int64 atime_ns = 9;
+
+    // TODO: use "oneof"
+    repeated ChunkRef chunks = 10;  // Files only
+    repeated ChildEntry child_entries  = 13; // Directories only
+
+    uint32 nlink = 11;
+}
