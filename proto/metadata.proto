@@ -25,6 +25,7 @@ message ChildEntry {
 // The mode field (S_IFDIR / S_IFREG) determines the type.
 // NOTE: inode number is NOT stored here - it's the key in the KV store.
 message InodeMeta {
+    // TODO: remove these two fields they are not really used
     string name = 1;
     uint64 parent_inode = 2;
 
