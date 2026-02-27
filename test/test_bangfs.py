@@ -225,32 +225,40 @@ TESTS = [
              "rm '{mount}/nonexistent'",
              Expected.FAIL),
 
-        Test("touch creates empty file",
+    ]),
+
+    # -------------------------------------------------------------------------
+    # PHASE 4: Rename and Move (Rename)
+    # -------------------------------------------------------------------------
+    ("PHASE 4: Rename and Move (Rename)", [
+
+        # Same-directory rename
+        Test("(Setup) touch file for rename",
              "touch '{mount}/name.txt'",
              Expected.SUCCESS),
 
-        Test("mv succeeds",
+        Test("mv renames file in same dir",
              "mv '{mount}/name.txt' '{mount}/renamed.txt'",
-          Expected.SUCCESS),
+             Expected.SUCCESS),
 
         Test("renamed file exists",
-          "stat '{mount}/renamed.txt'",
-          Expected.SUCCESS),
+             "stat '{mount}/renamed.txt'",
+             Expected.SUCCESS),
 
-        Test("previous file entry is gone after mv",
-          "test -f '{mount}/name.txt'",
-          Expected.FAIL),
+        Test("old name is gone after mv",
+             "test -f '{mount}/name.txt'",
+             Expected.FAIL),
 
         Test("cleanup renamed file",
              "rm '{mount}/renamed.txt'",
              Expected.SUCCESS),
 
-        # Cross-directory move
-        Test("(Setup) create subdir for cross-dir move",
+        # Cross-directory move (same name)
+        Test("(Setup) create source dir",
              "mkdir '{mount}/movesrc'",
              Expected.SUCCESS),
 
-        Test("(Setup) create dest subdir for cross-dir move",
+        Test("(Setup) create dest dir",
              "mkdir '{mount}/movedst'",
              Expected.SUCCESS),
 
@@ -258,15 +266,15 @@ TESTS = [
              "touch '{mount}/movesrc/crossfile.txt'",
              Expected.SUCCESS),
 
-        Test("mv file across directories",
+        Test("mv file to different dir",
              "mv '{mount}/movesrc/crossfile.txt' '{mount}/movedst/crossfile.txt'",
              Expected.SUCCESS),
 
-        Test("moved file exists in dest dir",
+        Test("file exists in dest dir",
              "test -f '{mount}/movedst/crossfile.txt'",
              Expected.SUCCESS),
 
-        Test("moved file is gone from source dir",
+        Test("file is gone from source dir",
              "test -f '{mount}/movesrc/crossfile.txt'",
              Expected.FAIL),
 
@@ -274,12 +282,45 @@ TESTS = [
              "rm '{mount}/movedst/crossfile.txt' && rmdir '{mount}/movesrc' '{mount}/movedst'",
              Expected.SUCCESS),
 
+        # Cross-directory move WITH rename
+        Test("(Setup) create source dir for move+rename",
+             "mkdir '{mount}/xsrc'",
+             Expected.SUCCESS),
+
+        Test("(Setup) create dest dir for move+rename",
+             "mkdir '{mount}/xdst'",
+             Expected.SUCCESS),
+
+        Test("(Setup) touch file for move+rename",
+             "touch '{mount}/xsrc/original.txt'",
+             Expected.SUCCESS),
+
+        Test("mv file to different dir with new name",
+             "mv '{mount}/xsrc/original.txt' '{mount}/xdst/newname.txt'",
+             Expected.SUCCESS),
+
+        Test("file exists under new name in dest dir",
+             "test -f '{mount}/xdst/newname.txt'",
+             Expected.SUCCESS),
+
+        Test("old name is gone from source dir",
+             "test -f '{mount}/xsrc/original.txt'",
+             Expected.FAIL),
+
+        Test("new name does not exist in source dir",
+             "test -f '{mount}/xsrc/newname.txt'",
+             Expected.FAIL),
+
+        Test("cleanup move+rename",
+             "rm '{mount}/xdst/newname.txt' && rmdir '{mount}/xsrc' '{mount}/xdst'",
+             Expected.SUCCESS),
+
     ]),
 
     # -------------------------------------------------------------------------
-    # PHASE 4: File Write Operations
+    # PHASE 5: File Write Operations
     # -------------------------------------------------------------------------
-    ("PHASE 4: File Write Operations (Write)", [
+    ("PHASE 5: File Write Operations (Write)", [
 
         Test("(Setup) Create a file for appending",
              "touch '{mount}/append.txt'",
@@ -379,9 +420,9 @@ TESTS = [
     ]),
 
     # -------------------------------------------------------------------------
-    # PHASE 5: File Read Operations
+    # PHASE 6: File Read Operations
     # -------------------------------------------------------------------------
-    ("PHASE 5: File Read Operations (Read)", [
+    ("PHASE 6: File Read Operations (Read)", [
         Test("setup: create file with known content",
              "echo -n 'ABCDEFGHIJ' > '{mount}/readtest.txt'",
              Expected.SUCCESS),
@@ -408,9 +449,9 @@ TESTS = [
     ]),
 
     # -------------------------------------------------------------------------
-    # PHASE 6: Large Files (multiple chunks)
+    # PHASE 7: Large Files (multiple chunks)
     # -------------------------------------------------------------------------
-    ("PHASE 6: Large Files (multiple chunks)", [
+    ("PHASE 7: Large Files (multiple chunks)", [
         Test("write 1MB file",
              "dd if=/dev/urandom of='{mount}/large.bin' bs=1M count=1 2>/dev/null",
              Expected.SUCCESS),
@@ -441,9 +482,9 @@ TESTS = [
     ]),
 
     # -------------------------------------------------------------------------
-    # PHASE 7: Files in Subdirectories
+    # PHASE 8: Files in Subdirectories
     # -------------------------------------------------------------------------
-    ("PHASE 7: Files in Subdirectories", [
+    ("PHASE 8: Files in Subdirectories", [
         Test("create subdirectory",
              "mkdir '{mount}/subdir'",
              Expected.SUCCESS),
@@ -474,9 +515,9 @@ TESTS = [
     ]),
 
     # -------------------------------------------------------------------------
-    # PHASE 8: chmod and chown
+    # PHASE 9: chmod and chown
     # -------------------------------------------------------------------------
-    ("PHASE 8: chmod and chown", [
+    ("PHASE 9: chmod and chown", [
         Test("setup: create test file",
              "touch '{mount}/permtest.txt'",
              Expected.SUCCESS),
@@ -600,9 +641,9 @@ TESTS = [
     ]),
 
     # -------------------------------------------------------------------------
-    # PHASE 9: Edge Cases and Error Handling
+    # PHASE 10: Edge Cases and Error Handling
     # -------------------------------------------------------------------------
-    ("PHASE 9: Edge Cases and Error Handling", [
+    ("PHASE 10: Edge Cases and Error Handling", [
         Test("file with spaces in name",
              "touch '{mount}/file with spaces.txt'",
              Expected.SUCCESS),
@@ -661,9 +702,9 @@ TESTS = [
     ]),
 
     # -------------------------------------------------------------------------
-    # PHASE 10: Overwrite and Truncate
+    # PHASE 11: Overwrite and Truncate
     # -------------------------------------------------------------------------
-    ("PHASE 10: Overwrite and Truncate", [
+    ("PHASE 11: Overwrite and Truncate", [
         Test("create initial file",
              "echo 'original content here' > '{mount}/overwrite.txt'",
              Expected.SUCCESS),
@@ -690,9 +731,9 @@ TESTS = [
     ]),
 
     # -------------------------------------------------------------------------
-    # PHASE 11: Random Write and Seek
+    # PHASE 12: Random Write and Seek
     # -------------------------------------------------------------------------
-    ("PHASE 11: Random Write and Seek", [
+    ("PHASE 12: Random Write and Seek", [
         # Setup: create a file with known content (20 bytes: AAAAA BBBBB CCCCC DDDDD)
         Test("setup: create 20-byte file",
              "printf 'AAAAABBBBBCCCCCDDDDD' > '{mount}/seek.txt'",
@@ -769,9 +810,9 @@ TESTS = [
     ]),
 
     # -------------------------------------------------------------------------
-    # PHASE 12: Random Write in Large (multi-chunk) Files
+    # PHASE 13: Random Write in Large (multi-chunk) Files
     # -------------------------------------------------------------------------
-    ("PHASE 12: Random Write in Large Files", [
+    ("PHASE 13: Random Write in Large Files", [
         # chunksize is 10240 bytes, so a 30KB file spans 3 chunks
         # Create a 30KB file filled with 'A' (0x41)
         Test("setup: create 30KB file of A's",
