@@ -66,7 +66,7 @@ func (bs *BangServer) Mount(mountpoint string) error {
 			//   to MaxWrite, rounding up.
 			MaxWrite:      gChunksize,
 			DisableXAttrs: true,
-			Logger:        nil,
+			//Logger:        nil,
 
 			// If set, ask kernel not to do automatic data cache invalidation.
 			// The filesystem is fully responsible for invalidating data cache.
