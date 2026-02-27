@@ -25,6 +25,7 @@ var _ = (fs.NodeMkdirer)((*BangDirNode)(nil))
 var _ = (fs.NodeLookuper)((*BangDirNode)(nil))
 var _ = (fs.NodeRmdirer)((*BangDirNode)(nil))
 var _ = (fs.NodeUnlinker)((*BangDirNode)(nil))
+var _ = (fs.NodeRenamer)((*BangDirNode)(nil))
 
 // Readdir lists directory contents and prepends . (self inode) and .. (parent inode) to the real children.
 func (d *BangDirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
@@ -289,7 +290,7 @@ func (d *BangDirNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	op := bangutil.GetTracer().Op("Unlink", inum, name)
 
 	// Read the directory children from the backend.
-	dirMeta, vclock, err := gKVStore.Metadata(inum)
+	dir_meta, vclock, err := gKVStore.Metadata(inum)
 	if err != nil {
 		op.Error(fmt.Errorf("getting metadata: %v", err))
 		return syscall.EIO
@@ -298,7 +299,7 @@ func (d *BangDirNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	// TODO: check that this is a regular file? the kernel seems to do this already.
 
 	// TODO: check Mkdir (and Create) should check existing entries? or does Lookup get called?
-	child_entries := dirMeta.GetChildEntries()
+	child_entries := dir_meta.GetChildEntries()
 	updated_child_entries := []*bangpb.ChildEntry{}
 	found := false
 	var inum_to_delete uint64
@@ -315,10 +316,10 @@ func (d *BangDirNode) Unlink(ctx context.Context, name string) syscall.Errno {
 		return syscall.ENOENT
 	}
 
-	dirMeta.ChildEntries = updated_child_entries
+	dir_meta.ChildEntries = updated_child_entries
 	//dirMeta.MtimeNs = now // TODO: check which of these to modify
 	//dirMeta.CtimeNs = now
-	_, err = gKVStore.UpdateMetadata(inum, dirMeta, vclock)
+	_, err = gKVStore.UpdateMetadata(inum, dir_meta, vclock)
 	if err != nil {
 		op.Error(fmt.Errorf("updating metadata for dir inode: %v", err))
 		return syscall.EIO
@@ -344,6 +345,113 @@ func (d *BangDirNode) Unlink(ctx context.Context, name string) syscall.Errno {
 	// TODO: make this work even if the file inode changed between reading and deleting it
 	if err = gKVStore.DeleteMetadata(inum_to_delete, unlinked_file_vclock); err != nil {
 		op.Error(fmt.Errorf("deleting file metadata: %v", err))
+	}
+
+	op.Done()
+	return 0
+}
+
+// Rename may change the parent inode or name of a file
+func (d *BangDirNode) Rename(ctx context.Context, name string, newParent fs.InodeEmbedder, newName string, flags uint32) syscall.Errno {
+	inum := d.StableAttr().Ino
+	op := bangutil.GetTracer().Op("Rename", inum, name)
+	op.Debugf("Rename %v to %v", name, newName)
+
+	new_parent_inum := newParent.EmbeddedInode().StableAttr().Ino
+	is_same_dir := inum == new_parent_inum
+
+	// Read source directory children from the backend.
+	dir_meta, dir_vclock, err := gKVStore.Metadata(inum)
+	if err != nil {
+		op.Error(fmt.Errorf("getting metadata: %v", err))
+		return syscall.EIO
+	}
+
+	// Find the source entry and build new child list without it.
+	child_entries := dir_meta.GetChildEntries()
+	var file_inum uint64
+	var file_meta *bangpb.InodeMeta
+	var file_vclock []byte
+	var trimmed_child_entries []*bangpb.ChildEntry // all entries but the file we rename
+	for _, c := range child_entries {
+		if name == c.Name {
+			file_inum = c.Inode
+			file_meta, file_vclock, err = gKVStore.Metadata(file_inum)
+			if err != nil {
+				op.Error(fmt.Errorf("getting metadata for found inode"))
+				return syscall.EIO
+			}
+			continue
+		}
+		trimmed_child_entries = append(trimmed_child_entries, c)
+	}
+	if file_meta == nil {
+		// Also, detected when mv calls stat()
+		op.Errorf("could not find %s in directory %s", name, dir_meta.Name)
+		return syscall.ENOENT
+	}
+
+	now := time.Now().UnixNano()
+
+	if is_same_dir {
+		dir_meta.ChildEntries = append(trimmed_child_entries, &bangpb.ChildEntry{Name: newName, Inode: file_inum})
+		dir_meta.MtimeNs = now
+		dir_meta.CtimeNs = now
+		_, err = gKVStore.UpdateMetadata(inum, dir_meta, dir_vclock)
+		if err != nil {
+			op.Error(fmt.Errorf("updating metadata for dir inode: %v", err))
+			return syscall.EIO
+		}
+
+		// file_meta.Name = newName
+		// _, err = gKVStore.UpdateMetadata(file_inum, file_meta, file_vclock)
+		// if err != nil {
+		// 	op.Error(fmt.Errorf("updating metadata for file inode: %v", err))
+		// 	return syscall.EIO
+		// }
+
+		op.Done()
+		return 0
+	}
+
+	// false = is_same_dir
+	dir_meta.ChildEntries = trimmed_child_entries
+	dir_meta.MtimeNs = now
+	dir_meta.CtimeNs = now
+	if IsDir(file_meta) {
+		dir_meta.Nlink--
+	}
+	_, err = gKVStore.UpdateMetadata(inum, dir_meta, dir_vclock)
+	if err != nil {
+		op.Error(fmt.Errorf("updating source dir metadata: %v", err))
+		return syscall.EIO
+	}
+
+	// Add to destination directory.
+	new_dir_meta, new_dir_vclock, err := gKVStore.Metadata(new_parent_inum)
+	if err != nil {
+		op.Error(fmt.Errorf("getting dest dir metadata: %v", err))
+		return syscall.EIO
+	}
+	new_dir_meta.ChildEntries = append(new_dir_meta.GetChildEntries(), &bangpb.ChildEntry{Name: newName, Inode: file_inum})
+	new_dir_meta.MtimeNs = now
+	new_dir_meta.CtimeNs = now
+	if IsDir(file_meta) {
+		new_dir_meta.Nlink++
+	}
+	_, err = gKVStore.UpdateMetadata(new_parent_inum, new_dir_meta, new_dir_vclock)
+	if err != nil {
+		op.Error(fmt.Errorf("updating dest dir metadata: %v", err))
+		return syscall.EIO
+	}
+
+	// Update the file's own metadata.
+	file_meta.Name = newName
+	//file_meta.ParentInode = new_parent_inum
+	_, err = gKVStore.UpdateMetadata(file_inum, file_meta, file_vclock)
+	if err != nil {
+		op.Error(fmt.Errorf("updating file metadata: %v", err))
+		return syscall.EIO
 	}
 
 	op.Done()

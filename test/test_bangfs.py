@@ -182,6 +182,7 @@ TESTS = [
         Test("cleanup nested path",
              "rm -rf '{mount}/a'",
              Expected.SUCCESS),
+
     ]),
 
     # -------------------------------------------------------------------------
@@ -211,7 +212,7 @@ TESTS = [
         Test("ls shows file",
              "ls '{mount}'",
              Expected.OUTPUT_CONTAINS, "testfile.txt"),
-
+     
         Test("rm removes file",
              "rm '{mount}/testfile.txt'",
              Expected.SUCCESS),
@@ -223,6 +224,56 @@ TESTS = [
         Test("rm non-existent file fails",
              "rm '{mount}/nonexistent'",
              Expected.FAIL),
+
+        Test("touch creates empty file",
+             "touch '{mount}/name.txt'",
+             Expected.SUCCESS),
+
+        Test("mv succeeds",
+             "mv '{mount}/name.txt' '{mount}/renamed.txt'",
+          Expected.SUCCESS),
+
+        Test("renamed file exists",
+          "stat '{mount}/renamed.txt'",
+          Expected.SUCCESS),
+
+        Test("previous file entry is gone after mv",
+          "test -f '{mount}/name.txt'",
+          Expected.FAIL),
+
+        Test("cleanup renamed file",
+             "rm '{mount}/renamed.txt'",
+             Expected.SUCCESS),
+
+        # Cross-directory move
+        Test("(Setup) create subdir for cross-dir move",
+             "mkdir '{mount}/movesrc'",
+             Expected.SUCCESS),
+
+        Test("(Setup) create dest subdir for cross-dir move",
+             "mkdir '{mount}/movedst'",
+             Expected.SUCCESS),
+
+        Test("(Setup) touch file in source dir",
+             "touch '{mount}/movesrc/crossfile.txt'",
+             Expected.SUCCESS),
+
+        Test("mv file across directories",
+             "mv '{mount}/movesrc/crossfile.txt' '{mount}/movedst/crossfile.txt'",
+             Expected.SUCCESS),
+
+        Test("moved file exists in dest dir",
+             "test -f '{mount}/movedst/crossfile.txt'",
+             Expected.SUCCESS),
+
+        Test("moved file is gone from source dir",
+             "test -f '{mount}/movesrc/crossfile.txt'",
+             Expected.FAIL),
+
+        Test("cleanup cross-dir move",
+             "rm '{mount}/movedst/crossfile.txt' && rmdir '{mount}/movesrc' '{mount}/movedst'",
+             Expected.SUCCESS),
+
     ]),
 
     # -------------------------------------------------------------------------
