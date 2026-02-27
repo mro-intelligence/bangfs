@@ -102,7 +102,7 @@ func (f *BangFH) appendChunk(ctx context.Context, data []byte) error {
 // writeMeta writes the metadata to KV and updates the vclock
 func (f *BangFH) writeMeta(ctx context.Context) error {
 	op := bangutil.GetTracer().Op("writeMeta", f.Inum, f.Metadata.Name)
-	op.Debugf("Write metadata for inode %d, vclock: %v", f.Inum, f.VClock)
+	//op.Debugf("Write metadata for inode %d, vclock: %v", f.Inum, f.VClock)
 
 	new_vclock, err := gKVStore.UpdateMetadata(f.Inum, f.Metadata, f.VClock)
 	if err != nil {
@@ -112,7 +112,7 @@ func (f *BangFH) writeMeta(ctx context.Context) error {
 	}
 
 	f.VClock = new_vclock // Our metadata should be in sync with what was written
-	op.Debugf("Metadata updated for inode %d, new vclcok: %v", f.Inum, f.VClock)
+	//op.Debugf("Metadata updated for inode %d, new vclcok: %v", f.Inum, f.VClock)
 	op.Done()
 	return nil
 }
@@ -120,7 +120,7 @@ func (f *BangFH) writeMeta(ctx context.Context) error {
 // resyncMetadata rereads the metadata in case of concurrent modification
 func (f *BangFH) resyncMetadata(ctx context.Context) error {
 	op := bangutil.GetTracer().Op("resyncMetadata", f.Inum, f.Metadata.Name)
-	op.Debugf("Resync metadata for inode %d", f.Inum)
+	//op.Debugf("Resync metadata for inode %d", f.Inum)
 
 	metadata, new_vclock, err := gKVStore.Metadata(f.Inum)
 	if err != nil {
@@ -130,7 +130,7 @@ func (f *BangFH) resyncMetadata(ctx context.Context) error {
 
 	f.VClock = new_vclock
 	f.Metadata = metadata
-	op.Debugf("Metadata resynced for inode %d, new vclcok: %v", f.Inum, f.VClock)
+	//op.Debugf("Metadata resynced for inode %d, new vclcok: %v", f.Inum, f.VClock)
 	op.Done()
 	return nil
 }
@@ -191,7 +191,7 @@ func (f *BangFH) writeAt(ctx context.Context, op *bangutil.TraceOp, data []byte,
 // Handles append, overwrite, and write-past-EOF (zero-fill gap).
 func (f *BangFH) Write(ctx context.Context, data []byte, off int64) (uint32, syscall.Errno) {
 	op := bangutil.GetTracer().Op("Write", f.Inum, f.Metadata.Name)
-	op.Debugf("Write %d bytes at offset %d to inode %d", len(data), off, f.Inum)
+	//op.Debugf("Write %d bytes at offset %d to inode %d", len(data), off, f.Inum)
 
 	// Re-read metadata: Setattr (e.g. O_TRUNC truncate) may have changed it.
 	// TODO: to save an extra read call we can track filehandles in the BangFile struct.
@@ -204,7 +204,7 @@ func (f *BangFH) Write(ctx context.Context, data []byte, off int64) (uint32, sys
 
 	// O_APPEND: force offset to end of file regardless of what the kernel sent
 	if f.Flags&syscall.O_APPEND != 0 {
-		op.Debugf("O_APPEND: adjusting offset from %d to %d", off, filesize)
+		//op.Debugf("O_APPEND: adjusting offset from %d to %d", off, filesize)
 		off = filesize
 	}
 
@@ -220,6 +220,7 @@ func (f *BangFH) Write(ctx context.Context, data []byte, off int64) (uint32, sys
 	}
 
 	if errno := f.writeAt(ctx, op, data, off); errno != 0 {
+		op.Errno(errno)
 		return 0, errno
 	}
 
@@ -233,7 +234,7 @@ func (f *BangFH) Write(ctx context.Context, data []byte, off int64) (uint32, sys
 		return 0, syscall.EIO
 	}
 
-	op.Debugf("Wrote %d bytes at offset %d (new size: %d)", len(data), off, f.Metadata.Size)
+	//op.Debugf("Wrote %d bytes at offset %d (new size: %d)", len(data), off, f.Metadata.Size)
 	op.Done()
 	return uint32(len(data)), 0
 }
@@ -241,11 +242,11 @@ func (f *BangFH) Write(ctx context.Context, data []byte, off int64) (uint32, sys
 // Read reads from the file and copies the result to data
 func (f *BangFH) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadResult, syscall.Errno) {
 	op := bangutil.GetTracer().Op("Read", f.Inum, f.Metadata.Name)
-	op.Debugf("Read up to %d bytes at offset %d", len(dest), off)
+	//op.Debugf("Read up to %d bytes at offset %d", len(dest), off)
 
 	filesize := int64(f.Metadata.Size)
 	if off >= filesize {
-		op.Debugf("offset exceeds file size (%d<%d)", len(dest), off)
+		//op.Debugf("offset exceeds file size (%d<%d)", len(dest), off)
 		op.Done()
 		return fuse.ReadResultData(nil), 0
 	}
@@ -295,7 +296,7 @@ func (f *BangFH) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadRes
 		chunk_offset = chunk_end
 	}
 
-	op.Debugf("Read returning %d bytes", len(buf))
+	//op.Debugf("Read returning %d bytes", len(buf))
 	op.Done()
 	return fuse.ReadResultData(buf), 0
 }
