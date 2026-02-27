@@ -94,20 +94,20 @@ func (bf *BangFileNode) Setattr(ctx context.Context, fh fs.FileHandle, in *fuse.
 	_, setuid := in.GetUID()
 	_, setgid := in.GetGID()
 	if setuid || setgid {
-		op.Debugf("NOT SUPPORTED YET: uid: %v, gid: %v", setuid, setgid)
+		op.Errorf("NOT SUPPORTED YET: uid: %v, gid: %v", setuid, setgid)
 		return syscall.ENOTSUP
 	}
 	var stale_chunk_keys []uint64
 	sz, setsize := in.GetSize()
 	if setsize {
 		if !IsFile(meta) {
-			op.Debug("truncate on non-file")
+			op.Errorf("truncate on non-file")
 			return syscall.ENOTSUP
 		}
-		op.Debugf("truncate to size: %d (was %d)", sz, meta.Size)
+		//op.Debugf("truncate to size: %d (was %d)", sz, meta.Size)
 		if sz > meta.Size {
 			// Extending file not supported yet
-			op.Debug("extending not supported")
+			op.Errorf("extending not supported")
 			return syscall.ENOTSUP
 		}
 		chkrefs := meta.Chunks
