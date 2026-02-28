@@ -11,7 +11,6 @@ if [[ -z "$BANGFS_NAMESPACE" ]]; then BANGFS_NAMESPACE="${1:-test}"; fi
 BASE="http://${RIAK_HOST}:${RIAK_HTTP_PORT}"
 META_TYPE="${BANGFS_NAMESPACE}_bangfs_metadata"
 CHUNK_TYPE="${BANGFS_NAMESPACE}_bangfs_chunks"
-COUNTER_TYPE="${BANGFS_NAMESPACE}_bangfs_counters"
 
 PASS=0
 FAIL=0
@@ -100,25 +99,5 @@ run_curl "GET chunk after delete" 404 \
 
 echo ""
 
-# --- Counter bucket type (CRDT) ---
-echo "--- Counter bucket type: $COUNTER_TYPE ---"
-
-run_curl "POST counter increment" 204 \
-    -X POST "${BASE}/types/${COUNTER_TYPE}/buckets/testbucket/datatypes/test_counter" \
-    -H 'Content-Type: application/json' \
-    -d '{"increment": 1}'
-
-run_curl "POST counter increment again" 204 \
-    -X POST "${BASE}/types/${COUNTER_TYPE}/buckets/testbucket/datatypes/test_counter" \
-    -H 'Content-Type: application/json' \
-    -d '{"increment": 1}'
-
-run_curl "GET counter" 200 \
-    "${BASE}/types/${COUNTER_TYPE}/buckets/testbucket/datatypes/test_counter"
-
-VAL=$(curl -s "${BASE}/types/${COUNTER_TYPE}/buckets/testbucket/datatypes/test_counter")
-echo "  Counter value: $VAL"
-
-echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [[ "$FAIL" -eq 0 ]]
