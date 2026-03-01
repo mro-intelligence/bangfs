@@ -137,7 +137,7 @@ func (f *BangFH) resyncMetadata(ctx context.Context) error {
 
 // writeAt splices data into the file at the given offset, modifying existing
 // chunks and appending new ones as needed.
-// All chunks except the last are exactly gChunksize bytes, so we use division
+// All chunks except the last are exactly GetChunkSize() bytes, so we use division
 // to index directly instead of walking.
 func (f *BangFH) writeAt(ctx context.Context, op *bangutil.TraceOp, data []byte, off int64) syscall.Errno {
 	chks := f.Metadata.Chunks
@@ -145,8 +145,8 @@ func (f *BangFH) writeAt(ctx context.Context, op *bangutil.TraceOp, data []byte,
 	data_pos := 0 // how far into data we've consumed
 
 	for data_pos < len(data) {
-		chunk_idx := int(pos / int64(gChunksize))
-		offset_in_chunk := int(pos % int64(gChunksize))
+		chunk_idx := int(pos / int64(GetChunkSize()))
+		offset_in_chunk := int(pos % int64(GetChunkSize()))
 
 		if chunk_idx < len(chks) {
 			// Overwrite within an existing chunk
@@ -156,9 +156,9 @@ func (f *BangFH) writeAt(ctx context.Context, op *bangutil.TraceOp, data []byte,
 				return syscall.EIO
 			}
 			// Extend the chunk buffer if the write goes past its current size
-			// (can happen on the last chunk which may be shorter than gChunksize)
-			if offset_in_chunk+len(data)-data_pos > len(existing) && len(existing) < int(gChunksize) {
-				grown := make([]byte, min(int(gChunksize), offset_in_chunk+len(data)-data_pos))
+			// (can happen on the last chunk which may be shorter than GetChunkSize())
+			if offset_in_chunk+len(data)-data_pos > len(existing) && len(existing) < int(GetChunkSize()) {
+				grown := make([]byte, min(int(GetChunkSize()), offset_in_chunk+len(data)-data_pos))
 				copy(grown, existing)
 				existing = grown
 			}
@@ -172,7 +172,7 @@ func (f *BangFH) writeAt(ctx context.Context, op *bangutil.TraceOp, data []byte,
 		} else {
 			// Past the last chunk — append new ones
 			remaining := len(data) - data_pos
-			n := min(uint32(remaining), gChunksize)
+			n := min(uint32(remaining), GetChunkSize())
 			if err := f.appendChunk(ctx, data[data_pos:data_pos+int(n)]); err != nil {
 				op.Errorf("appendChunk: %v", err)
 				return syscall.EIO

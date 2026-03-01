@@ -31,8 +31,11 @@ func main() {
 	port := flag.Uint("port", envPortOrDefault("RIAK_PORT", 8087), "Riak port (env: RIAK_PORT)")
 	namespace := flag.String("namespace", envOrDefault("BANGFS_NAMESPACE", ""), "Filesystem namespace (env: BANGFS_NAMESPACE)")
 	dummy := flag.Bool("dummy", false, "Use file-backed store under /tmp instead of Riak")
+	chunkSize := flag.Uint("chunk-size", 1024*1024, "Chunk size in bytes (default 1MB)")
 
 	flag.Parse()
+
+	bangfuse.SetChunkSize(uint32(*chunkSize))
 
 	if *namespace == "" {
 		log.Println("Error: -namespace is required (or set BANGFS_NAMESPACE)")
@@ -55,7 +58,7 @@ func main() {
 			os.Exit(1)
 		}
 		log.Printf("Connecting to Riak at %s:%d", *host, *port)
-		rkv, err := bangfuse.NewRiakKVStore(*host, uint16(*port), *namespace)
+		rkv, err := bangfuse.NewRiakKVStore(*host, uint16(*port), *namespace, 0, "")
 		if err != nil {
 			log.Fatalf("Failed to connect to backend: %v", err)
 		}
@@ -72,5 +75,6 @@ func main() {
 	log.Printf("Filesystem initialized successfully!")
 	log.Printf("  Metadata bucket: %s_bangfs_metadata", *namespace)
 	log.Printf("  Chunk bucket:    %s_bangfs_chunks", *namespace)
+	log.Printf("  Chunk size:      %d bytes", *chunkSize)
 	log.Printf("\nMount with: mount-fuse-bangfs -host %s -port %d -namespace %s -mount /your/mountpoint", *host, *port, *namespace)
 }

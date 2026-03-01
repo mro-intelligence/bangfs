@@ -33,6 +33,12 @@ func main() {
 	dummy := flag.Bool("dummy", false, "Use file-backed store under /tmp instead of Riak")
 	daemon := flag.Bool("daemon", false, "Run in background (daemon mode)")
 	daemonChild := flag.Bool("daemon-child", false, "Internal flag for daemon mode")
+	httpPortDefault := uint(8098)
+	if v, err := strconv.ParseUint(envOrDefault("RIAK_HTTP_PORT", "8098"), 10, 16); err == nil {
+		httpPortDefault = uint(v)
+	}
+	httpPort := flag.Uint("http-port", httpPortDefault, "Riak HTTP port for stats/df (env: RIAK_HTTP_PORT)")
+	dataPath := flag.String("data-path", envOrDefault("BANGFS_DATA_PATH", "/data"), "Preferred disk mount path for df (env: BANGFS_DATA_PATH)")
 	trace := flag.Bool("trace", false, "Enable tracing output for debugging")
 	tracelog := flag.String("tracelog", "", "Write trace output to file instead of stderr")
 
@@ -71,17 +77,14 @@ func main() {
 		os.Exit(0)
 	}
 
-	var bs *bangfuse.BangServer
+	var kv bangfuse.KVStore
 	if *dummy {
 		log.Printf("Using file-backed store (namespace=%s)", *namespace)
 		fkv, err := bangfuse.NewFileKVStore(*namespace)
 		if err != nil {
 			log.Fatalf("Failed to create file store: %v", err)
 		}
-		bs, err = bangfuse.NewBangServerWithKV(fkv)
-		if err != nil {
-			log.Fatalf("Failed to initialize: %v", err)
-		}
+		kv = fkv
 	} else {
 		if *host == "" {
 			log.Println("Error: -host is required (or set RIAK_HOST), or use -dummy")
@@ -89,15 +92,19 @@ func main() {
 			os.Exit(1)
 		}
 		log.Printf("Connecting to Riak at %s:%d", *host, *port)
-		var err error
-		bs, err = bangfuse.NewBangServer(*host, uint16(*port), *namespace)
+		rkv, err := bangfuse.NewRiakKVStore(*host, uint16(*port), *namespace, uint16(*httpPort), *dataPath)
 		if err != nil {
-			log.Fatalf("Failed to initialize: %v", err)
+			log.Fatalf("Failed to connect to backend: %v", err)
 		}
+		kv = rkv
+	}
+	bs, err := bangfuse.NewBangServer(kv)
+	if err != nil {
+		log.Fatalf("Failed to initialize: %v", err)
 	}
 	defer bs.Close()
 
-	log.Printf("Mounting BangFS (namespace=%s) at %s", *namespace, *mountpoint)
+	log.Printf("Mounting BangFS (namespace=%s) at %s (chunk size: %d bytes)", *namespace, *mountpoint, bangfuse.GetChunkSize())
 	if err := bs.Mount(*mountpoint); err != nil {
 		log.Fatalf("Mount failed: %v", err)
 	}

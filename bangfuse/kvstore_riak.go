@@ -114,7 +114,7 @@ func (kv *RiakKVStore) InitBackend() error {
 		ChildEntries: []*bangpb.ChildEntry{},
 		Chunks:       nil,
 		Nlink:        2,
-		BlockSize:    gChunksize,
+		BlockSize:    GetChunkSize(),
 	}
 
 	if _, err := kv.PutMetadata(0, root_dir); err != nil {
@@ -371,14 +371,33 @@ func (kv *RiakKVStore) wipeBucket(w io.Writer, bucketType, bucket string) (int, 
 	total := len(lkc.Response.Keys)
 	fmt.Fprintf(w, "  found %d keys in %s/%s\n", total, bucketType, bucket)
 
-	// Delete each key
+	// Delete each key (fetch VClock first so Riak properly resolves the delete)
 	keycount := 0
 	for _, key := range lkc.Response.Keys {
-		del_cmd, err := riak.NewDeleteValueCommandBuilder().
+		// Fetch the object to get its VClock
+		fetch_cmd, err := riak.NewFetchValueCommandBuilder().
 			WithBucketType(bucketType).
 			WithBucket(bucket).
 			WithKey(string(key)).
 			Build()
+		if err != nil {
+			return 0, fmt.Errorf("failed to build fetch command for key %s: %w", key, err)
+		}
+		if err := kv.cluster.Execute(fetch_cmd); err != nil {
+			return 0, fmt.Errorf("failed to fetch key %s for vclock: %w", key, err)
+		}
+
+		del_builder := riak.NewDeleteValueCommandBuilder().
+			WithBucketType(bucketType).
+			WithBucket(bucket).
+			WithKey(string(key))
+
+		fvc := fetch_cmd.(*riak.FetchValueCommand)
+		if fvc.Response != nil && len(fvc.Response.VClock) > 0 {
+			del_builder = del_builder.WithVClock(fvc.Response.VClock)
+		}
+
+		del_cmd, err := del_builder.Build()
 		if err != nil {
 			return 0, fmt.Errorf("failed to build delete command for key %s: %w", key, err)
 		}
