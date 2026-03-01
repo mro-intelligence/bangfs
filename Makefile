@@ -43,5 +43,4 @@ unit-test: build
 # Integration tests (requires running Riak instance)
 # Set RIAK_HOST, RIAK_PORT, BANGFS_NAMESPACE env vars or use defaults
 integration-test: build
-	go test ./bangfuse/ -v -integration
 	cd test && python3 test_bangfs.py

@@ -76,7 +76,7 @@ func main() {
 			os.Exit(1)
 		}
 		log.Printf("Connecting to Riak at %s:%d", *host, *port)
-		rkv, err := bangfuse.NewRiakKVStore(*host, uint16(*port), *namespace)
+		rkv, err := bangfuse.NewRiakKVStore(*host, uint16(*port), *namespace, 0, "")
 		if err != nil {
 			log.Fatalf("Failed to connect to backend: %v", err)
 		}
@@ -90,5 +90,5 @@ func main() {
 		log.Fatalf("Failed to wipe filesystem: %v", err)
 	}
 
-	log.Printf("Filesystem destroyed successfully.")
+	log.Printf("Filesystem wiped successfuly")
 }

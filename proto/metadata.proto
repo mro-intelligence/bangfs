@@ -45,4 +45,7 @@ message InodeMeta {
     repeated ChildEntry child_entries  = 13; // Directories only
 
     uint32 nlink = 11;
+
+    // Filesystem-level config (only set on root inode 0)
+    uint32 block_size = 14;     // chunk/block size in bytes (default 1MB)
 }

@@ -31,7 +31,7 @@ var _ = (fs.NodeStatfser)((*BangDirNode)(nil))
 
 // Statfs reports filesystem statistics for df.
 func (d *BangDirNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
-	info, err := gKVStore.DiskUsage(gChunksize)
+	info, err := gKVStore.DiskUsage(GetChunkSize())
 	if err != nil {
 		log.Printf("bangfs: Statfs: %v", err)
 		return 0 // return OK with zeros rather than failing df
@@ -40,8 +40,8 @@ func (d *BangDirNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.E
 	out.Blocks = info.TotalChunks
 	out.Bfree = info.TotalChunks - info.UsedChunks
 	out.Bavail = out.Bfree
-	out.Bsize = gChunksize
-	out.Frsize = gChunksize
+	out.Bsize = GetChunkSize()
+	out.Frsize = GetChunkSize()
 	out.NameLen = 255
 	out.Files = 1 << 30 // no real inode limit in a KV backend
 	out.Ffree = 1 << 30
