@@ -7,6 +7,7 @@ package bangfuse
 import (
 	"fmt"
 	"syscall"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -56,7 +57,12 @@ func (bs *BangServer) Mount(mountpoint string) error {
 	gChunkidgen = NewIdGenerator()
 
 	root := &BangDirNode{}
+	entry_timeout := time.Second * 30
+	//attr_timeout := time.Second * 30
 	server, err := fs.Mount(mountpoint, root, &fs.Options{
+
+		EntryTimeout: &entry_timeout,
+		//AttrTimeout:  &attr_timeout,
 		MountOptions: fuse.MountOptions{
 			FsName:      "bangfs",
 			Name:        "bangfs",

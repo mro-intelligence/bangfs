@@ -209,8 +209,9 @@ func (bf *BangFileNode) Open(ctx context.Context, flags uint32) (fs.FileHandle, 
 	op.SetName(meta.Name)
 
 	fh := &BangFH{Inum: inum, Metadata: meta, VClock: vclock, Flags: flags}
-	fuse_flags := 0 // TODO: set flags
+	var fuse_flags uint32
+	fuse_flags |= fuse.FOPEN_KEEP_CACHE
 
 	op.Done()
-	return fh, uint32(fuse_flags), 0
+	return fh, fuse_flags, 0
 }

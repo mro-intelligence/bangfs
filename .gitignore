@@ -17,3 +17,5 @@ bangfs-*
 **/__pycache__
 *-bangfs
 bangfs_testbang
+test_fs_caching_shim.sh
+test_fs_simple_wr.sh
