@@ -5,6 +5,7 @@ import (
 	bangpb "bangfs/proto"
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"syscall"
 	"time"
@@ -26,6 +27,26 @@ var _ = (fs.NodeLookuper)((*BangDirNode)(nil))
 var _ = (fs.NodeRmdirer)((*BangDirNode)(nil))
 var _ = (fs.NodeUnlinker)((*BangDirNode)(nil))
 var _ = (fs.NodeRenamer)((*BangDirNode)(nil))
+var _ = (fs.NodeStatfser)((*BangDirNode)(nil))
+
+// Statfs reports filesystem statistics for df.
+func (d *BangDirNode) Statfs(ctx context.Context, out *fuse.StatfsOut) syscall.Errno {
+	info, err := gKVStore.DiskUsage(gChunksize)
+	if err != nil {
+		log.Printf("bangfs: Statfs: %v", err)
+		return 0 // return OK with zeros rather than failing df
+	}
+
+	out.Blocks = info.TotalChunks
+	out.Bfree = info.TotalChunks - info.UsedChunks
+	out.Bavail = out.Bfree
+	out.Bsize = gChunksize
+	out.Frsize = gChunksize
+	out.NameLen = 255
+	out.Files = 1 << 30 // no real inode limit in a KV backend
+	out.Ffree = 1 << 30
+	return 0
+}
 
 // Readdir lists directory contents and prepends . (self inode) and .. (parent inode) to the real children.
 func (d *BangDirNode) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {

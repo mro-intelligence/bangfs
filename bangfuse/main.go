@@ -19,7 +19,9 @@ var gKVStore KVStore
 var gInumgen *IdGenerator
 var gChunkidgen *IdGenerator
 
-const gChunksize = 1024 * 1024 // 1MB
+const defaultChunkSize = 1024 * 1024 // 1MB
+
+var gChunksize uint32 = defaultChunkSize
 
 // BangServer wraps a FUSE server and its backend KV connection.
 type BangServer struct {
@@ -28,8 +30,8 @@ type BangServer struct {
 }
 
 // NewBangServer connects to a Riak backend and verifies the filesystem exists.
-func NewBangServer(host string, port uint16, namespace string) (*BangServer, error) {
-	kvStore, err := NewRiakKVStore(host, port, namespace)
+func NewBangServer(host string, port uint16, namespace string, httpPort uint16, dataPath string) (*BangServer, error) {
+	kvStore, err := NewRiakKVStore(host, port, namespace, httpPort, dataPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to backend: %w", err)
 	}
@@ -38,10 +40,14 @@ func NewBangServer(host string, port uint16, namespace string) (*BangServer, err
 
 // NewBangServerWithKV creates a BangServer with any KVStore implementation.
 func NewBangServerWithKV(kvStore KVStore) (*BangServer, error) {
-	// Verify filesystem exists (inode 0)
-	if _, _, err := kvStore.Metadata(0); err != nil {
+	// Verify filesystem exists (inode 0) and read chunk size
+	rootMeta, _, err := kvStore.Metadata(0)
+	if err != nil {
 		kvStore.Close()
 		return nil, fmt.Errorf("filesystem not initialized (run mkbangfs first): %w", err)
+	}
+	if rootMeta.BlockSize > 0 {
+		gChunksize = rootMeta.BlockSize
 	}
 
 	return &BangServer{kv: kvStore}, nil
@@ -64,7 +70,7 @@ func (bs *BangServer) Mount(mountpoint string) error {
 			//In Linux 4.20 and later, the value
 			//   can go up to 1 MiB and go-fuse calculates the MaxPages value acc.
 			//   to MaxWrite, rounding up.
-			MaxWrite:      gChunksize,
+			MaxWrite:      int(gChunksize),
 			DisableXAttrs: true,
 			//Logger:        nil,
 
