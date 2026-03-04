@@ -32,7 +32,7 @@ type chunkEntry struct {
 	dirty bool
 }
 
-// RiakKVStore holds a connection to the Riak backend
+// RiakKVStore implements KVStore using Riak KV as the backend.
 type RiakKVStore struct {
 	metadataBucketType string
 	chunkBucketType    string
@@ -90,7 +90,7 @@ func NewRiakKVStore(host string, port uint16, namespace string, httpPort uint16,
 		errChan:            make(chan error),
 	}
 	if err := kv.Connect(); err != nil {
-		return kv, err // for latter printing of the values
+		return kv, err // return partially-initialized kv so caller can log host/port
 	}
 
 	//chunkCache, cacherr := lru.New[uint64, chunkEntry](max(1, cacheSize/int(GetChunkSize())))
@@ -113,7 +113,7 @@ func NewRiakKVStore(host string, port uint16, namespace string, httpPort uint16,
 	return kv, nil
 }
 
-// Connect connects or reconnects to the backend
+// Connect establishes a connection to the Riak cluster.
 func (kv *RiakKVStore) Connect() error {
 	node_addr := fmt.Sprintf("%s:%d", kv.host, kv.pb_port)
 	node_opts := &riak.NodeOptions{
@@ -125,7 +125,7 @@ func (kv *RiakKVStore) Connect() error {
 	}
 	node, err := riak.NewNode(node_opts)
 	if err != nil {
-		return fmt.Errorf("failed to create node: %w", err)
+		return fmt.Errorf("Connect: create node %s: %w", node_addr, err)
 	}
 
 	cluster_opts := &riak.ClusterOptions{
@@ -133,28 +133,26 @@ func (kv *RiakKVStore) Connect() error {
 	}
 	cluster, err := riak.NewCluster(cluster_opts)
 	if err != nil {
-		return fmt.Errorf("failed to create cluster: %w", err)
+		return fmt.Errorf("Connect: create cluster: %w", err)
 	}
 
 	if err := cluster.Start(); err != nil {
-		return fmt.Errorf("failed to start cluster: %w", err)
+		return fmt.Errorf("Connect: start cluster: %w", err)
 	}
 
 	kv.cluster = cluster
 	return nil
 }
 
-// InitBackend initializes backend root node.
-// thus making a new filesystem in the namespace.
+// InitBackend creates the root inode (inode 0), initializing a new filesystem in the namespace.
 func (kv *RiakKVStore) InitBackend() error {
 	if kv.cluster == nil {
-		return fmt.Errorf("cluster not connected to %s:%d", kv.host, kv.pb_port)
+		return fmt.Errorf("InitBackend: cluster not connected to %s:%d", kv.host, kv.pb_port)
 	}
 
-	// Check if filesystem already exists (inode 0 present)
 	existing, _, err := kv.Metadata(0)
 	if err == nil && existing != nil {
-		return fmt.Errorf("filesystem already exists (inode 0 found in bucket %s). Use WipeBackend() first to reinitialize", kv.metadataBucketType)
+		return fmt.Errorf("InitBackend: filesystem already exists (inode 0 in bucket %s), wipe first", kv.metadataBucketType)
 	}
 
 	// Create root inode (inode 0) as empty directory
@@ -174,13 +172,13 @@ func (kv *RiakKVStore) InitBackend() error {
 	}
 
 	if _, err := kv.PutMetadata(0, root_dir); err != nil {
-		return fmt.Errorf("failed to create root inode: %w\n", err)
+		return fmt.Errorf("InitBackend: create root inode: %w", err)
 	}
 
 	return nil
 }
 
-// Close closes the connection to the backend and shuts down channels
+// Close drains the write queue, waits for workers to finish, and stops the cluster.
 func (kv *RiakKVStore) Close() error {
 	close(kv.writeQueue)
 	kv.writeWg.Wait()
@@ -191,19 +189,17 @@ func (kv *RiakKVStore) Close() error {
 	return nil
 }
 
-// PutMetadata creates new metadata entries with optimistic concurrency control:
-// If the key already exists, the function will fail.
-// TODO: implement retries
+// PutMetadata inserts new metadata. Fails if the key already exists (IfNoneMatch).
+// Returns the vclock for subsequent updates.
 func (kv *RiakKVStore) PutMetadata(key uint64, newMeta *bangpb.InodeMeta) ([]byte, error) {
-
 	data, err := proto.Marshal(newMeta)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal metadata: %w", err)
+		return nil, fmt.Errorf("PutMetadata: marshal inode %d: %w", key, err)
 	}
 
 	obj := &riak.Object{
 		Bucket:      metadataBucket,
-		BucketType:  kv.metadataBucketType, // TODO: Check if passing ButcketType is redundant
+		BucketType:  kv.metadataBucketType,
 		Key:         fmt.Sprintf("%d", key),
 		ContentType: "application/protobuf",
 		Value:       data,
@@ -213,32 +209,31 @@ func (kv *RiakKVStore) PutMetadata(key uint64, newMeta *bangpb.InodeMeta) ([]byt
 		WithBucketType(kv.metadataBucketType).
 		WithBucket(metadataBucket).
 		WithContent(obj).
-		WithIfNoneMatch(true). // Concurrency control here!
-		WithReturnBody(true).  // Need this to get vclock back
+		WithIfNoneMatch(true).
+		WithReturnBody(true).
 		Build()
 	if err != nil {
-		return nil, fmt.Errorf("failed to build store command: %w", err)
+		return nil, fmt.Errorf("PutMetadata: build store for inode %d: %w", key, err)
 	}
 
 	if err := kv.cluster.Execute(cmd); err != nil {
-		return nil, fmt.Errorf("failed to execute store: %w", err)
+		return nil, fmt.Errorf("PutMetadata: store inode %d: %w", key, err)
 	}
 
 	svc := cmd.(*riak.StoreValueCommand)
 	vclock := svc.Response.VClock
 	if len(vclock) == 0 {
-		return nil, fmt.Errorf("didn't get vclock")
+		return nil, fmt.Errorf("PutMetadata: no vclock returned for inode %d", key)
 	}
 	return vclock, nil
 }
 
-// UpdateMetadata stores inode metadata with optimistic concurrency control.
-// Its intended to fail if the metadata has been updated since the last read.
+// UpdateMetadata overwrites metadata with optimistic concurrency (IfNotModified).
+// Fails if the vclock doesn't match, indicating a concurrent modification.
 func (kv *RiakKVStore) UpdateMetadata(key uint64, newMeta *bangpb.InodeMeta, vclock_in []byte) ([]byte, error) {
-
 	data, err := proto.Marshal(newMeta)
 	if err != nil {
-		return nil, fmt.Errorf("failed to marshal metadata: %w", err)
+		return nil, fmt.Errorf("UpdateMetadata: marshal inode %d: %w", key, err)
 	}
 
 	obj := &riak.Object{
@@ -254,49 +249,49 @@ func (kv *RiakKVStore) UpdateMetadata(key uint64, newMeta *bangpb.InodeMeta, vcl
 		WithBucketType(kv.metadataBucketType).
 		WithBucket(metadataBucket).
 		WithContent(obj).
-		WithIfNotModified(true). // Concurrency control here!
-		WithReturnBody(true).    // Need this to get vclock back
+		WithIfNotModified(true).
+		WithReturnBody(true).
 		Build()
 	if err != nil {
-		return nil, fmt.Errorf("failed to build store command: %w", err)
+		return nil, fmt.Errorf("UpdateMetadata: build store for inode %d: %w", key, err)
 	}
 
 	if err := kv.cluster.Execute(cmd); err != nil {
-		return nil, fmt.Errorf("failed to execute store: %w", err)
+		return nil, fmt.Errorf("UpdateMetadata: store inode %d: %w", key, err)
 	}
 	svc := cmd.(*riak.StoreValueCommand)
 	return svc.Response.VClock, err
 }
 
-// GetMeta retrieves inode metadata
-func (kv *RiakKVStore) Metadata(key uint64) (*bangpb.InodeMeta /*vclock*/, []byte, error) {
+// Metadata fetches inode metadata and its vclock by inode number.
+func (kv *RiakKVStore) Metadata(key uint64) (*bangpb.InodeMeta, []byte, error) {
 	cmd, err := riak.NewFetchValueCommandBuilder().
 		WithBucketType(kv.metadataBucketType).
 		WithBucket(metadataBucket).
 		WithKey(fmt.Sprintf("%d", key)).
 		Build()
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to build fetch command: %w", err)
+		return nil, nil, fmt.Errorf("Metadata: build fetch for inode %d: %w", key, err)
 	}
 
 	if err := kv.cluster.Execute(cmd); err != nil {
-		return nil, nil, fmt.Errorf("failed to execute fetch: %w", err)
+		return nil, nil, fmt.Errorf("Metadata: fetch inode %d: %w", key, err)
 	}
 
 	fvc := cmd.(*riak.FetchValueCommand)
 	if fvc.Response == nil || len(fvc.Response.Values) == 0 {
-		return nil, nil, fmt.Errorf("key not found: %d", key)
+		return nil, nil, fmt.Errorf("Metadata: inode %d not found", key)
 	}
 
 	meta := &bangpb.InodeMeta{}
 	if err := proto.Unmarshal(fvc.Response.Values[0].Value, meta); err != nil {
-		return nil, nil, fmt.Errorf("failed to unmarshal metadata: %w", err)
+		return nil, nil, fmt.Errorf("Metadata: unmarshal inode %d: %w", key, err)
 	}
 	return meta, fvc.Response.VClock, nil
 }
 
-// DeleteMetadata deletes inode metadata with optimistic concurrency control.
-// Pass the vclock from the last read to ensure no concurrent modification.
+// DeleteMetadata removes inode metadata. If vclockIn is non-nil, the delete
+// is conditional on the vclock matching (optimistic concurrency).
 func (kv *RiakKVStore) DeleteMetadata(key uint64, vclockIn []byte) error {
 	builder := riak.NewDeleteValueCommandBuilder().
 		WithBucketType(kv.metadataBucketType).
@@ -307,11 +302,11 @@ func (kv *RiakKVStore) DeleteMetadata(key uint64, vclockIn []byte) error {
 	}
 	cmd, err := builder.Build()
 	if err != nil {
-		return fmt.Errorf("failed to build delete command: %w", err)
+		return fmt.Errorf("DeleteMetadata: build delete for inode %d: %w", key, err)
 	}
 
 	if err := kv.cluster.Execute(cmd); err != nil {
-		return fmt.Errorf("failed to execute delete: %w", err)
+		return fmt.Errorf("DeleteMetadata: delete inode %d: %w", key, err)
 	}
 	return nil
 }
@@ -320,16 +315,14 @@ func (kv *RiakKVStore) riakWriteWorker() {
 	kv.writeWg.Add(1)
 	defer kv.writeWg.Done()
 	for cmd := range kv.writeQueue {
-
 		if err := kv.cluster.Execute(cmd); err != nil {
-			// Could also consider invalidating the cache here
-			kv.errChan <- fmt.Errorf("failed to execute cmd: %w", err)
+			kv.errChan <- fmt.Errorf("writeWorker: execute: %w", err)
 		}
 		if svc, ok := cmd.(*riak.StoreValueCommand); ok {
 			keystr := svc.Response.Values[0].Key
 			var key uint64
 			if nscan, err := fmt.Sscanf(keystr, "%016x", &key); err != nil {
-				kv.errChan <- fmt.Errorf("clearing key from cache, read %d vals: %v", nscan, err)
+				kv.errChan <- fmt.Errorf("writeWorker: parse chunk key %q (scanned %d): %v", keystr, nscan, err)
 				continue
 			}
 			kv.markClean(key)
@@ -358,18 +351,17 @@ func (kv *RiakKVStore) onEvict(key uint64, chunkEntry chunkEntry) {
 			WithContent(obj).
 			Build()
 		if err != nil {
-			kv.errChan <- fmt.Errorf("evicting: failed to build store command: %w", err)
+			kv.errChan <- fmt.Errorf("onEvict: build store for chunk %016x: %w", key, err)
 		}
 
 		if err := kv.enqueue(cmd); err != nil {
-			kv.errChan <- fmt.Errorf("evicting: failed to execute store: %w", err)
+			kv.errChan <- fmt.Errorf("onEvict: enqueue chunk %016x: %w", key, err)
 		}
 	}
 }
 
-// PutChunk stores a chunk by its key
+// PutChunk writes a chunk to cache (dirty) and enqueues an async store to Riak.
 func (kv *RiakKVStore) PutChunk(key uint64, data []byte) error {
-
 	kv.chunkCache.Add(key, chunkEntry{dirty: true, data: data})
 	obj := &riak.Object{
 		Bucket:      chunkBucket,
@@ -385,20 +377,18 @@ func (kv *RiakKVStore) PutChunk(key uint64, data []byte) error {
 		WithContent(obj).
 		Build()
 	if err != nil {
-		return fmt.Errorf("failed to build store command: %w", err)
+		return fmt.Errorf("PutChunk: build store for chunk %016x: %w", key, err)
 	}
 
 	if err := kv.enqueue(cmd); err != nil {
-		return fmt.Errorf("failed to execute store: %w", err)
+		return fmt.Errorf("PutChunk: enqueue chunk %016x: %w", key, err)
 	}
 
 	return nil
 }
 
-// Chunk retrieves a chunk by its key
+// Chunk retrieves a chunk by key, checking the cache first, then fetching from Riak.
 func (kv *RiakKVStore) Chunk(key uint64) ([]byte, error) {
-
-	// Check cache for chunk
 	if kv.chunkCache.Contains(key) {
 		dat, ok := kv.chunkCache.Get(key)
 		if ok {
@@ -412,16 +402,16 @@ func (kv *RiakKVStore) Chunk(key uint64) ([]byte, error) {
 		WithKey(fmt.Sprintf("%016x", key)).
 		Build()
 	if err != nil {
-		return nil, fmt.Errorf("failed to build fetch command: %w", err)
+		return nil, fmt.Errorf("Chunk: build fetch for chunk %016x: %w", key, err)
 	}
 
 	if err := kv.cluster.Execute(cmd); err != nil {
-		return nil, fmt.Errorf("failed to execute fetch: %w", err)
+		return nil, fmt.Errorf("Chunk: fetch chunk %016x: %w", key, err)
 	}
 
 	fvc := cmd.(*riak.FetchValueCommand)
 	if fvc.Response == nil || len(fvc.Response.Values) == 0 {
-		return nil, fmt.Errorf("chunk not found: %016x", key)
+		return nil, fmt.Errorf("Chunk: chunk %016x not found", key)
 	}
 
 	data := fvc.Response.Values[0].Value
@@ -430,9 +420,8 @@ func (kv *RiakKVStore) Chunk(key uint64) ([]byte, error) {
 	return fvc.Response.Values[0].Value, nil
 }
 
-// DeleteChunk deletes a chunk by its key
+// DeleteChunk removes a chunk from cache and enqueues an async delete to Riak.
 func (kv *RiakKVStore) DeleteChunk(key uint64) error {
-
 	kv.chunkCache.Remove(key)
 
 	cmd, err := riak.NewDeleteValueCommandBuilder().
@@ -441,79 +430,75 @@ func (kv *RiakKVStore) DeleteChunk(key uint64) error {
 		WithKey(fmt.Sprintf("%016x", key)).
 		Build()
 	if err != nil {
-		return fmt.Errorf("failed to build delete command: %w", err)
+		return fmt.Errorf("DeleteChunk: build delete for chunk %016x: %w", key, err)
 	}
 
 	if err := kv.enqueue(cmd); err != nil {
-		return fmt.Errorf("failed to execute store: %w", err)
+		return fmt.Errorf("DeleteChunk: enqueue delete for chunk %016x: %w", key, err)
 	}
 
 	return nil
 }
 
-// WipeBackend deletes all metadata and chunks from the backend.
-// Progress is written to w (pass io.Discard or os.Stderr).
+// WipeBackend deletes all metadata and chunk keys from Riak.
+// Progress is written to w.
 func (kv *RiakKVStore) WipeBackend(w io.Writer) error {
 	if kv.cluster == nil {
-		return fmt.Errorf("cluster not connected")
+		return fmt.Errorf("WipeBackend: cluster not connected")
 	}
 
 	fmt.Fprintf(w, "  wiping metadata [%s/%s]...\n", kv.metadataBucketType, metadataBucket)
 	num_meta_keys, err := kv.wipeBucket(w, kv.metadataBucketType, metadataBucket)
 	if err != nil {
-		return fmt.Errorf("failed to wipe metadata bucket: %w", err)
+		return fmt.Errorf("WipeBackend: wipe metadata bucket: %w", err)
 	}
 	fmt.Fprintf(w, "  deleted %d metadata keys\n", num_meta_keys)
 
 	fmt.Fprintf(w, "  wiping chunks [%s/%s]...\n", kv.chunkBucketType, chunkBucket)
 	num_chunk_keys, err := kv.wipeBucket(w, kv.chunkBucketType, chunkBucket)
 	if err != nil {
-		return fmt.Errorf("failed to wipe chunk bucket: %w", err)
+		return fmt.Errorf("WipeBackend: wipe chunk bucket: %w", err)
 	}
 	fmt.Fprintf(w, "  deleted %d chunk keys\n", num_chunk_keys)
 
 	return nil
 }
 
-// wipeBucket deletes all keys in a bucket
+// wipeBucket lists and deletes all keys in a bucket, fetching vclocks first for clean deletes.
 func (kv *RiakKVStore) wipeBucket(w io.Writer, bucketType, bucket string) (int, error) {
-
-	// List all keys in the bucket
 	cmd, err := riak.NewListKeysCommandBuilder().
 		WithBucketType(bucketType).
 		WithBucket(bucket).
 		WithStreaming(false).
 		Build()
 	if err != nil {
-		return 0, fmt.Errorf("failed to build list keys command: %w", err)
+		return 0, fmt.Errorf("wipeBucket %s/%s: build list keys: %w", bucketType, bucket, err)
 	}
 
 	if err := kv.cluster.Execute(cmd); err != nil {
-		return 0, fmt.Errorf("failed to list keys: %w", err)
+		return 0, fmt.Errorf("wipeBucket %s/%s: list keys: %w", bucketType, bucket, err)
 	}
 
 	lkc := cmd.(*riak.ListKeysCommand)
 	if lkc.Response == nil {
-		return 0, fmt.Errorf("no keys found in bucket: %v", bucket)
+		return 0, fmt.Errorf("wipeBucket %s/%s: no keys found", bucketType, bucket)
 	}
 
 	total := len(lkc.Response.Keys)
 	fmt.Fprintf(w, "  found %d keys in %s/%s\n", total, bucketType, bucket)
 
-	// Delete each key (fetch VClock first so Riak properly resolves the delete)
 	keycount := 0
 	for _, key := range lkc.Response.Keys {
-		// Fetch the object to get its VClock
 		fetch_cmd, err := riak.NewFetchValueCommandBuilder().
 			WithBucketType(bucketType).
 			WithBucket(bucket).
 			WithKey(string(key)).
 			Build()
 		if err != nil {
-			return 0, fmt.Errorf("failed to build fetch command for key %s: %w", key, err)
+			return 0, fmt.Errorf("wipeBucket: build fetch for key %s: %w", key, err)
 		}
 		if err := kv.cluster.Execute(fetch_cmd); err != nil {
-			return 0, fmt.Errorf("failed to fetch key %s for vclock: %w", key, err)
+			return 0, fmt.Errorf("wipeBucket: fetch vclock for key %s: %w", key, err)
 		}
 
 		del_builder := riak.NewDeleteValueCommandBuilder().
@@ -528,11 +513,11 @@ func (kv *RiakKVStore) wipeBucket(w io.Writer, bucketType, bucket string) (int, 
 
 		del_cmd, err := del_builder.Build()
 		if err != nil {
-			return 0, fmt.Errorf("failed to build delete command for key %s: %w", key, err)
+			return 0, fmt.Errorf("wipeBucket: build delete for key %s: %w", key, err)
 		}
 
 		if err := kv.cluster.Execute(del_cmd); err != nil {
-			return 0, fmt.Errorf("failed to delete key %s: %w", key, err)
+			return 0, fmt.Errorf("wipeBucket: delete key %s: %w", key, err)
 		}
 		keycount++
 	}
@@ -541,9 +526,8 @@ func (kv *RiakKVStore) wipeBucket(w io.Writer, bucketType, bucket string) (int, 
 }
 
 // --- DiskUsage: Riak HTTP stats ---
-// Block usage / free is synthesized from free disk space on each cluster member (bytes/chunksize)
-// Its not intended to be accurate but rather a rough estimate of how much space is available for new data.
-//
+// Block usage/free is synthesized from free disk space on each cluster member (bytes/chunksize).
+// It's a rough estimate, not a precise accounting of per-namespace usage.
 
 // riakStatsResponse holds the fields we care about from GET /stats
 type riakStatsResponse struct {
@@ -568,7 +552,7 @@ func (kv *RiakKVStore) DiskUsage(chunkSize uint32) (*DiskUsageInfo, error) {
 	seedStats, err := fetchRiakStats(client, seedURL)
 	if err != nil {
 		op.Error(err)
-		return nil, fmt.Errorf("failed to fetch seed stats from %s: %w", seedURL, err)
+		return nil, fmt.Errorf("DiskUsage: fetch seed stats from %s: %w", seedURL, err)
 	}
 
 	// Extract host addresses from ring_members (e.g. "riak@192.168.1.1" -> "192.168.1.1")
@@ -600,7 +584,7 @@ func (kv *RiakKVStore) DiskUsage(chunkSize uint32) (*DiskUsageInfo, error) {
 	}
 
 	if respondedCount == 0 {
-		return nil, fmt.Errorf("no Riak hosts responded with disk info")
+		return nil, fmt.Errorf("DiskUsage: no cluster nodes responded with disk info")
 	}
 
 	return &DiskUsageInfo{
@@ -621,7 +605,7 @@ func fetchRiakStats(client *http.Client, url string) (*riakStatsResponse, error)
 	}
 	var stats riakStatsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&stats); err != nil {
-		return nil, fmt.Errorf("failed to decode stats: %w", err)
+		return nil, fmt.Errorf("fetchRiakStats: decode JSON from %s: %w", url, err)
 	}
 	return &stats, nil
 }
@@ -649,7 +633,7 @@ func extractHostsFromMembers(members []string) []string {
 // Returns totalBytes, usedBytes.
 func extractDiskInfo(stats *riakStatsResponse, preferredPath string) (uint64, uint64, error) {
 	if len(stats.Disk) == 0 {
-		return 0, 0, fmt.Errorf("no disk data in stats response")
+		return 0, 0, fmt.Errorf("extractDiskInfo: no disk entries in stats response")
 	}
 
 	var best *riakDiskEntry
