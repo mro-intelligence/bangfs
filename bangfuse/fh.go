@@ -31,14 +31,15 @@ func (f *BangFH) String() string {
 var _ = (fs.FileWriter)((*BangFH)(nil))
 var _ = (fs.FileReader)((*BangFH)(nil))
 var _ = (fs.FileFlusher)((*BangFH)(nil))
-var _ = (fs.FileSetattrer)((*BangFH)(nil))
+
+//var _ = (fs.FileSetattrer)((*BangFH)(nil))
 
 //var _ = (fs.FileFlusher)(*BangFH)(nil))
 
 // var _ = (fs.File)
-func (f *BangFH) Setattr(ctx context.Context, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
-	return syscall.ENOTUNIQ
-}
+// func (f *BangFH) Setattr(ctx context.Context, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+// 	return syscall.ENOTUNIQ
+// }
 
 // replaceChunk replaces a chunk in the file with new data
 func (f *BangFH) replaceChunk(ctx context.Context, idx int, data []byte) error {

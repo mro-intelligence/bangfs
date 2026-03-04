@@ -101,7 +101,11 @@ func NewRiakKVStore(host string, port uint16, namespace string, httpPort uint16,
 	kv.chunkCache = chunkCache
 
 	for i := 0; i < numWriteWorkers; i++ {
-		go kv.riakWriteWorker()
+		clustercon, err := kv.clusterConnect()
+		if err != nil {
+			return kv, fmt.Errorf("NewRiakKVStore: create worker %d: %v", i, err)
+		}
+		go kv.riakWriteWorker(clustercon)
 	}
 
 	go func() {
@@ -314,12 +318,13 @@ func (kv *RiakKVStore) DeleteMetadata(key uint64, vclockIn []byte) error {
 	return nil
 }
 
-func (kv *RiakKVStore) riakWriteWorker() {
+func (kv *RiakKVStore) riakWriteWorker(clustercon *riak.Cluster) {
 	kv.writeWg.Add(1)
 	defer kv.writeWg.Done()
+	defer clustercon.Stop()
 	for cmd := range kv.writeQueue {
 		var cmderr error
-		cmderr = kv.cluster.Execute(cmd)
+		cmderr = clustercon.Execute(cmd)
 		if svc, ok := cmd.(*riak.StoreValueCommand); ok {
 			keystr := svc.Response.Values[0].Key
 			var key uint64
