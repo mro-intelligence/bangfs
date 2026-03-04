@@ -32,6 +32,11 @@ type chunkEntry struct {
 	dirty bool
 }
 
+type queueEntry struct {
+	key uint64
+	cmd riak.Command
+}
+
 // RiakKVStore implements KVStore using Riak KV as the backend.
 type RiakKVStore struct {
 	metadataBucketType string
@@ -42,7 +47,7 @@ type RiakKVStore struct {
 	httpPort           uint16 // Riak HTTP API port for stats (default 8098)
 	dataPath           string // preferred disk mount point for df (default "/data")
 	chunkCache         *lru.Cache[uint64, chunkEntry]
-	writeQueue         chan riak.Command
+	writeQueue         chan queueEntry
 	writeWg            sync.WaitGroup
 	errChan            chan error
 }
@@ -86,7 +91,7 @@ func NewRiakKVStore(host string, port uint16, namespace string, httpPort uint16,
 		pb_port:            port,
 		httpPort:           httpPort,
 		dataPath:           dataPath,
-		writeQueue:         make(chan riak.Command, maxQueueLen),
+		writeQueue:         make(chan queueEntry, maxQueueLen),
 		errChan:            make(chan error),
 	}
 	if err := kv.Connect(); err != nil {
@@ -318,31 +323,26 @@ func (kv *RiakKVStore) DeleteMetadata(key uint64, vclockIn []byte) error {
 	return nil
 }
 
+// WriteMetadata writes inode metadata to the backend.
 func (kv *RiakKVStore) riakWriteWorker(clustercon *riak.Cluster) {
 	kv.writeWg.Add(1)
 	defer kv.writeWg.Done()
 	defer clustercon.Stop()
-	for cmd := range kv.writeQueue {
-		var cmderr error
-		cmderr = clustercon.Execute(cmd)
-		if svc, ok := cmd.(*riak.StoreValueCommand); ok {
-			keystr := svc.Response.Values[0].Key
-			var key uint64
-			if nscan, err := fmt.Sscanf(keystr, "%016x", &key); err != nil {
-				kv.errChan <- fmt.Errorf("writeWorker: parse chunk key %q (scanned %d): %v", keystr, nscan, err)
-				continue
-			}
-			if cmderr == nil {
-				kv.markClean(key)
-				continue
-			}
+	for entry := range kv.writeQueue {
+		key, cmd := entry.key, entry.cmd
+		cmderr := clustercon.Execute(cmd)
+		if cmderr != nil {
 			kv.errChan <- fmt.Errorf("writeWorker: execute: %w", cmderr)
+			continue
+		}
+		if _, ok := cmd.(*riak.StoreValueCommand); ok {
+			kv.markClean(key)
 		}
 	}
 }
 
-func (kv *RiakKVStore) enqueue(cmd riak.Command) error {
-	kv.writeQueue <- cmd
+func (kv *RiakKVStore) enqueue(key uint64, cmd riak.Command) error {
+	kv.writeQueue <- queueEntry{key: key, cmd: cmd}
 	return nil
 }
 
@@ -365,7 +365,7 @@ func (kv *RiakKVStore) onEvict(key uint64, chunkEntry chunkEntry) {
 			kv.errChan <- fmt.Errorf("onEvict: build store for chunk %016x: %w", key, err)
 		}
 
-		if err := kv.enqueue(cmd); err != nil {
+		if err := kv.enqueue(key, cmd); err != nil {
 			kv.errChan <- fmt.Errorf("onEvict: enqueue chunk %016x: %w", key, err)
 		}
 	}
@@ -391,7 +391,7 @@ func (kv *RiakKVStore) PutChunk(key uint64, data []byte) error {
 		return fmt.Errorf("PutChunk: build store for chunk %016x: %w", key, err)
 	}
 
-	if err := kv.enqueue(cmd); err != nil {
+	if err := kv.enqueue(key, cmd); err != nil {
 		return fmt.Errorf("PutChunk: enqueue chunk %016x: %w", key, err)
 	}
 
@@ -444,7 +444,7 @@ func (kv *RiakKVStore) DeleteChunk(key uint64) error {
 		return fmt.Errorf("DeleteChunk: build delete for chunk %016x: %w", key, err)
 	}
 
-	if err := kv.enqueue(cmd); err != nil {
+	if err := kv.enqueue(key, cmd); err != nil {
 		return fmt.Errorf("DeleteChunk: enqueue delete for chunk %016x: %w", key, err)
 	}
 

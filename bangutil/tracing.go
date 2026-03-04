@@ -1,13 +1,27 @@
 package bangutil
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"os"
+	"runtime"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
 )
+
+// goid returns the current goroutine ID.
+func goid() uint64 {
+	var buf [64]byte
+	n := runtime.Stack(buf[:], false)
+	// Stack output starts with "goroutine <id> ["
+	s := bytes.TrimPrefix(buf[:n], []byte("goroutine "))
+	s = s[:bytes.IndexByte(s, ' ')]
+	id, _ := strconv.ParseUint(string(s), 10, 64)
+	return id
+}
 
 // Tracer provides tracing for filesystem operations
 type Tracer struct {
@@ -112,7 +126,7 @@ func (o *TraceOp) Done() {
 		return
 	}
 	elapsed := time.Since(o.start)
-	o.tracer.logger.Printf("%s(inum=%d, name=%q) OK [%v]", o.op, o.inum, o.name, elapsed)
+	o.tracer.logger.Printf("[gid=%d] %s(inum=%d, name=%q) OK [%v]", goid(), o.op, o.inum, o.name, elapsed)
 }
 
 // Error marks the operation as failed with an error
@@ -121,7 +135,7 @@ func (o *TraceOp) Error(err error) {
 		return
 	}
 	elapsed := time.Since(o.start)
-	o.tracer.logger.Printf("%s(inum=%d, name=%q) ERROR: %v [%v]", o.op, o.inum, o.name, err, elapsed)
+	o.tracer.logger.Printf("[gid=%d] %s(inum=%d, name=%q) ERROR: %v [%v]", goid(), o.op, o.inum, o.name, err, elapsed)
 }
 
 // Errorf marks the operation as failed with printf-style formatting
@@ -135,7 +149,7 @@ func (o *TraceOp) Debug(info string) {
 		return
 	}
 	elapsed := time.Since(o.start)
-	o.tracer.logger.Printf("%s(inum=%d, name=%q) DEBUG: %v [%v]", o.op, o.inum, o.name, info, elapsed)
+	o.tracer.logger.Printf("[gid=%d] %s(inum=%d, name=%q) DEBUG: %v [%v]", goid(), o.op, o.inum, o.name, info, elapsed)
 }
 
 // Debugf marks a debug message with printf-style formatting
@@ -153,7 +167,7 @@ func (o *TraceOp) Errno(errno syscall.Errno) {
 	}
 	elapsed := time.Since(o.start)
 	errName := ErrnoName(errno)
-	o.tracer.logger.Printf("%s(inum=%d, name=%q) %s [%v]", o.op, o.inum, o.name, errName, elapsed)
+	o.tracer.logger.Printf("[gid=%d] %s(inum=%d, name=%q) %s [%v]", goid(), o.op, o.inum, o.name, errName, elapsed)
 }
 
 // ErrnoName returns a human-readable name for common errno values
@@ -214,7 +228,7 @@ func (k *TraceKV) Done() {
 		return
 	}
 	elapsed := time.Since(k.start)
-	k.tracer.logger.Printf("  kv.%s(%s) OK [%v]", k.op, k.key, elapsed)
+	k.tracer.logger.Printf("[gid=%d]   kv.%s(%s) OK [%v]", goid(), k.op, k.key, elapsed)
 }
 
 // Error marks the KV operation as failed
@@ -223,5 +237,5 @@ func (k *TraceKV) Error(err error) {
 		return
 	}
 	elapsed := time.Since(k.start)
-	k.tracer.logger.Printf("  kv.%s(%s) ERROR: %v [%v]", k.op, k.key, err, elapsed)
+	k.tracer.logger.Printf("[gid=%d]   kv.%s(%s) ERROR: %v [%v]", goid(), k.op, k.key, err, elapsed)
 }
