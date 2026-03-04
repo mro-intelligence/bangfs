@@ -31,10 +31,14 @@ func (f *BangFH) String() string {
 var _ = (fs.FileWriter)((*BangFH)(nil))
 var _ = (fs.FileReader)((*BangFH)(nil))
 var _ = (fs.FileFlusher)((*BangFH)(nil))
+var _ = (fs.FileSetattrer)((*BangFH)(nil))
 
 //var _ = (fs.FileFlusher)(*BangFH)(nil))
 
-//var _ = (fs.File)
+// var _ = (fs.File)
+func (f *BangFH) Setattr(ctx context.Context, in *fuse.SetAttrIn, out *fuse.AttrOut) syscall.Errno {
+	return syscall.ENOTUNIQ
+}
 
 // replaceChunk replaces a chunk in the file with new data
 func (f *BangFH) replaceChunk(ctx context.Context, idx int, data []byte) error {
@@ -209,12 +213,12 @@ func (f *BangFH) Write(ctx context.Context, data []byte, off int64) (uint32, sys
 
 	// Re-read metadata: Setattr (e.g. O_TRUNC truncate) may have changed it.
 	// TODO: to save an extra read call we can track filehandles in the BangFile struct.
-	if off == 0 {
-		if err := f.resyncMetadata(ctx); err != nil {
-			op.Error(fmt.Errorf("resyncMetadata: %v", err))
-			return 0, syscall.EIO
-		}
+	//if off == 0 {
+	if err := f.resyncMetadata(ctx); err != nil {
+		op.Error(fmt.Errorf("resyncMetadata: %v", err))
+		return 0, syscall.EIO
 	}
+	//}
 
 	filesize := int64(f.Metadata.Size)
 

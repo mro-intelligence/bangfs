@@ -113,8 +113,7 @@ func NewRiakKVStore(host string, port uint16, namespace string, httpPort uint16,
 	return kv, nil
 }
 
-// Connect establishes a connection to the Riak cluster.
-func (kv *RiakKVStore) Connect() error {
+func (kv *RiakKVStore) clusterConnect() (*riak.Cluster, error) {
 	node_addr := fmt.Sprintf("%s:%d", kv.host, kv.pb_port)
 	node_opts := &riak.NodeOptions{
 		RemoteAddress: node_addr,
@@ -125,7 +124,7 @@ func (kv *RiakKVStore) Connect() error {
 	}
 	node, err := riak.NewNode(node_opts)
 	if err != nil {
-		return fmt.Errorf("Connect: create node %s: %w", node_addr, err)
+		return nil, fmt.Errorf("Connect: create node %s: %w", node_addr, err)
 	}
 
 	cluster_opts := &riak.ClusterOptions{
@@ -133,15 +132,19 @@ func (kv *RiakKVStore) Connect() error {
 	}
 	cluster, err := riak.NewCluster(cluster_opts)
 	if err != nil {
-		return fmt.Errorf("Connect: create cluster: %w", err)
+		return nil, fmt.Errorf("Connect: create cluster: %w", err)
 	}
 
 	if err := cluster.Start(); err != nil {
-		return fmt.Errorf("Connect: start cluster: %w", err)
+		return nil, fmt.Errorf("Connect: start cluster: %w", err)
 	}
+	return cluster, nil
+}
 
-	kv.cluster = cluster
-	return nil
+// Connect establishes a connection to the Riak cluster.
+func (kv *RiakKVStore) Connect() (err error) {
+	kv.cluster, err = kv.clusterConnect()
+	return
 }
 
 // InitBackend creates the root inode (inode 0), initializing a new filesystem in the namespace.
@@ -315,9 +318,8 @@ func (kv *RiakKVStore) riakWriteWorker() {
 	kv.writeWg.Add(1)
 	defer kv.writeWg.Done()
 	for cmd := range kv.writeQueue {
-		if err := kv.cluster.Execute(cmd); err != nil {
-			kv.errChan <- fmt.Errorf("writeWorker: execute: %w", err)
-		}
+		var cmderr error
+		cmderr = kv.cluster.Execute(cmd)
 		if svc, ok := cmd.(*riak.StoreValueCommand); ok {
 			keystr := svc.Response.Values[0].Key
 			var key uint64
@@ -325,7 +327,11 @@ func (kv *RiakKVStore) riakWriteWorker() {
 				kv.errChan <- fmt.Errorf("writeWorker: parse chunk key %q (scanned %d): %v", keystr, nscan, err)
 				continue
 			}
-			kv.markClean(key)
+			if cmderr == nil {
+				kv.markClean(key)
+				continue
+			}
+			kv.errChan <- fmt.Errorf("writeWorker: execute: %w", cmderr)
 		}
 	}
 }
