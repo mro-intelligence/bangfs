@@ -25,10 +25,11 @@ const chunkBucket = "chunks"
 const statsHTTPTimeout = 5 * time.Second
 
 const maxQueueLen = 1000
-const numWriteWorkers = 8
+const numWriteWorkers = 2
 
 type chunkEntry struct {
-	data []byte
+	data  []byte
+	dirty bool
 }
 
 // RiakKVStore holds a connection to the Riak backend
@@ -46,23 +47,24 @@ type RiakKVStore struct {
 	errChan            chan error
 }
 
-func (kv *RiakKVStore) riakWriteWorker() {
-	kv.writeWg.Add(1)
-	defer kv.writeWg.Done()
-	for cmd := range kv.writeQueue {
-		if err := kv.cluster.Execute(cmd); err != nil {
-			// Could also consider invalidating the cache here
-			kv.errChan <- fmt.Errorf("failed to execute cmd: %w", err)
-		}
+func (kv *RiakKVStore) dirty(chunkkey uint64) bool {
+	if entry, ok := kv.chunkCache.Peek(chunkkey); ok {
+		return entry.dirty
+	}
+	return false
+}
+
+func (kv *RiakKVStore) markDirty(chunkkey uint64) {
+	if entry, ok := kv.chunkCache.Peek(chunkkey); ok {
+		entry.dirty = true
+		kv.chunkCache.Add(chunkkey, entry)
 	}
 }
 
-func (kv *RiakKVStore) enqueue(cmd riak.Command) error {
-	select {
-	case kv.writeQueue <- cmd:
-		return nil
-	default:
-		return fmt.Errorf("write queue full")
+func (kv *RiakKVStore) markClean(chunkkey uint64) {
+	if entry, ok := kv.chunkCache.Peek(chunkkey); ok {
+		entry.dirty = false
+		kv.chunkCache.Add(chunkkey, entry)
 	}
 }
 
@@ -91,7 +93,8 @@ func NewRiakKVStore(host string, port uint16, namespace string, httpPort uint16,
 		return kv, err // for latter printing of the values
 	}
 
-	chunkCache, cacherr := lru.New[uint64, chunkEntry](max(1, cacheSize/int(GetChunkSize())))
+	//chunkCache, cacherr := lru.New[uint64, chunkEntry](max(1, cacheSize/int(GetChunkSize())))
+	chunkCache, cacherr := lru.NewWithEvict[uint64, chunkEntry](max(1, cacheSize/int(GetChunkSize())), kv.onEvict)
 	if cacherr != nil {
 		return kv, cacherr
 	}
@@ -103,7 +106,7 @@ func NewRiakKVStore(host string, port uint16, namespace string, httpPort uint16,
 
 	go func() {
 		for e := range kv.errChan {
-			fmt.Fprintf(errorWriter, "%v", e)
+			fmt.Fprintf(errorWriter, "RiakKVStore: %v", e)
 		}
 	}()
 
@@ -181,6 +184,7 @@ func (kv *RiakKVStore) InitBackend() error {
 func (kv *RiakKVStore) Close() error {
 	close(kv.writeQueue)
 	kv.writeWg.Wait()
+	close(kv.errChan)
 	if kv.cluster != nil {
 		return kv.cluster.Stop()
 	}
@@ -312,10 +316,61 @@ func (kv *RiakKVStore) DeleteMetadata(key uint64, vclockIn []byte) error {
 	return nil
 }
 
+func (kv *RiakKVStore) riakWriteWorker() {
+	kv.writeWg.Add(1)
+	defer kv.writeWg.Done()
+	for cmd := range kv.writeQueue {
+
+		if err := kv.cluster.Execute(cmd); err != nil {
+			// Could also consider invalidating the cache here
+			kv.errChan <- fmt.Errorf("failed to execute cmd: %w", err)
+		}
+		if svc, ok := cmd.(*riak.StoreValueCommand); ok {
+			keystr := svc.Response.Values[0].Key
+			var key uint64
+			if nscan, err := fmt.Sscanf(keystr, "%016x", &key); err != nil {
+				kv.errChan <- fmt.Errorf("clearing key from cache, read %d vals: %v", nscan, err)
+				continue
+			}
+			kv.markClean(key)
+		}
+	}
+}
+
+func (kv *RiakKVStore) enqueue(cmd riak.Command) error {
+	kv.writeQueue <- cmd
+	return nil
+}
+
+func (kv *RiakKVStore) onEvict(key uint64, chunkEntry chunkEntry) {
+	if chunkEntry.dirty {
+		obj := &riak.Object{
+			Bucket:      chunkBucket,
+			BucketType:  kv.chunkBucketType,
+			Key:         fmt.Sprintf("%016x", key),
+			ContentType: "application/octet-stream",
+			Value:       chunkEntry.data,
+		}
+
+		cmd, err := riak.NewStoreValueCommandBuilder().
+			WithBucketType(kv.chunkBucketType).
+			WithBucket(chunkBucket).
+			WithContent(obj).
+			Build()
+		if err != nil {
+			kv.errChan <- fmt.Errorf("evicting: failed to build store command: %w", err)
+		}
+
+		if err := kv.enqueue(cmd); err != nil {
+			kv.errChan <- fmt.Errorf("evicting: failed to execute store: %w", err)
+		}
+	}
+}
+
 // PutChunk stores a chunk by its key
 func (kv *RiakKVStore) PutChunk(key uint64, data []byte) error {
 
-	kv.chunkCache.Add(key, chunkEntry{data})
+	kv.chunkCache.Add(key, chunkEntry{dirty: true, data: data})
 	obj := &riak.Object{
 		Bucket:      chunkBucket,
 		BucketType:  kv.chunkBucketType,
@@ -368,6 +423,9 @@ func (kv *RiakKVStore) Chunk(key uint64) ([]byte, error) {
 	if fvc.Response == nil || len(fvc.Response.Values) == 0 {
 		return nil, fmt.Errorf("chunk not found: %016x", key)
 	}
+
+	data := fvc.Response.Values[0].Value
+	kv.chunkCache.Add(key, chunkEntry{dirty: false, data: data})
 
 	return fvc.Response.Values[0].Value, nil
 }
