@@ -1,83 +1,134 @@
 # BangFS
 
-## Motivation
+Experimental FUSE distributed filesystem with minimal components:
 
-- Build a novel distributed filesystem out of available parts, insipired by GFS.
-- Experimental, intended to test distributed systems concepts.
-- For read-oriented storage, ie, backups, data.
-- Minimal components exposed: Only a key value store and a FUSE client program 
-  - (And a file system checker...and... this is the motivation, not the end result)
-- Ultimately may be useful for utilizing free disk space across heterogenous machines
+- A key value store for metadata.
+- A key value store for file data chunks
+- A client program
 
-## High Level Goals
+## Architecture
 
-- Use a single off the shelf key value store service for all data and metadata
-  - file data is stored in chunks, addressed by sequence number, and writes are eventually consistent
-  - metadata is strongly consistent (reads are guaranteed to see all previous writes): acheive this by enabling a *strongly consistent* property on these keys
-- Avoid explicit 'leader-follower' patterns
-- Try not to run any other services (coordinators, monitors, metadata servers, managers...)
-- Be scaleable, in theory as much as the key value store can handle.
-- Handle concurrent writes with optimistic concurrency control (CAS operations)
+```
+  ┌────────────────────────────┐
+  │  library calls (user)      │  (ls, cp, touch, mkdir)
+  └────┬───────────────────────┘
+       │
+       │ FUSE   (userspace ↔ kernel ↔ userspace)
+       │
+  ┌────┴─────┐
+  │  BangFS  │  mount-fs-bangfs, mkfs-bangfs
+  └────┬─────┘
+       │ KVStore interface
+       ├──────────────────────┐
+  ┌────┴──────┐         ┌─────┴──────┐
+  │  Metadata │         │  Chunks    │
+  └───────────┘         └────────────┘
+```
 
-## Tradeoffs: 
-- metadata consistent -> writes to metadata are slower than to file data due to consensus algorithm
-- file data eventually consistent -> writes are faster than to metadata
-- If a read operation occurs soon after a write, this difference means there is no guarantee that  file chunks listed in the internal inode metadata will have completed writing. Accept this and possibly other edge cases.
+### Key value store
 
-## Low Level Design
+#### Metadata
 
- - Use [Riak](https://docs.riak.com/riak/kv/latest/index.html) as the key/value store. (this is a POC which is not intended to be a production system and should work with any decent key value store.)
- - The key value store is abstracted with a Go interface so it will be easy to create a different backend implementation if this is ever useful (eg, DynamaDB, ScyllaDB).
+Contains almost all fields in a vfs inode, ie what you see when you `stat file`.
+- **Metadata** requirement (inodes, directory entries): stored in a **strongly consistent** bucket. Reads always see previous writes. 
+- Metadata is keyed by inode number. The metadata values are single protobuf messages.
+- Metadata representing file inodes contains a list of chunk keys for each fixed-size chunk of data in the file.
 
-## Design issues and shortcomings
+#### File chunks
+- Files are broken up into as same-size chunks (except for the last chunk in a file, which may be shorter). 
+- Chunks will be stored in an **eventually consistent** bucket: a read immediately after a write may not reflect the latest data.
 
-_Probably nobody would actually build a production system this way._ 
+### Concurrency
 
-- There are many distributed filesystems out there, but few (none that I could find with a web search) use a key value store for both metadata and file data: This is not necessarily a bad thing. It speaks also to organizational dynamics, design requirements and established solutions already being out there. The concept for this filesystem was thought up literally overnight.
-- The strongly consistent bucket type propery in Riak, which the implementaion depends upon, is listed as "experimental" in the Riak 2.2.3 documentation.
-- 
+#### *Metadata*: 
+
+Concurrent access to metadata via vector clocks (vclock). Metadata updates use CAS with optimistic concurrency control (ie read the data, modify it, and try to write).
+
+#### *File Chunks*:
+
+Chunk data lives in an eventually consistent bucket. This means there is no guarantee that writes to the same chunk key will be propagated to replicas in the same order — indeed, in a distributed system there is no real concept of simultaneity ([as Lamport showed](https://lamport.azurewebsites.net/pubs/time-clocks.pdf)).
+
+#### Unique Sequence numbers
+If two clients wrote to the *same* chunk key, a reader could see a mix of data from different writers depending on which replica it hits.
+
+Currently this is solved with **write-once chunk keys**: each client's `IdGenerator` embeds its own identity (see *Unique ids*), two clients will never produce the same key. Every chunk write (whether appending or replacing an existing chunk) generates a fresh, globally unique key. The metadata is updated to point to the new key.
+
+This gives a useful invariant: for any version of the metadata (containing the ordered list of chunk keys), every referenced chunk is immutable and will eventually be readable with exactly the data that one client intended to write. 
+
+### KVStore interface
+
+The backend is abstracted behind a Go interface (`KVStore`) with separate operations for metadata and chunks.
+The current _implementation_ uses Riak's KV backend, but this interface could be implemented for any key value store.
+
+### Design decisions / tradeoffs
+
+Overall the designed is for
+- Use case of single writer at a time per file:
+  - for example, unlike something like GFS concurrent append is not really thought through. 
+  - But this makes it convenient to use simple CAS (read, modify, write if not updated in the meantime) for metadata writes. This eliminates the need for some kind of coordination services at the cost of maybe failing some writes, orphaning chunks, and undefined effects.
+- File data writes are expected to be on the hot path - tradeoff of consistency for speed writing (eg, storing a large file without the consensus overhead of strong consistency)
+
 
 ## Status
 
-- `make test` builds successfully and (hermetic/unit) tests pass.
-- `make integration-test` also builds successfully against a single, non-distributed Riak KVStore instance.
-- `mkfs-bangfs && mount-fuse-bangfs` create and mount the fs, its visible in the `$BANGFS_MOUNTDIR`. (See below for environment var setup.)
+- `mkfs-bangfs && mount-fuse-bangfs` create and mount the filesystem, visible at `$BANGFS_MOUNTDIR`
+- `make test` builds and passes 
+- `make integration-test` builds and runs against a single Riak instance. Integration tests are occasionally flaky due to Riak eventual consistency propagation delays on the chunk bucket — a read immediately after a write may not see the data yet.
 
-## TODOS
+## Shortcomings
 
-- Multiple
-- 
+Conceptual
+
+- The concept was thought up overnight. Probably nobody would actually build a production system this way.
+- The strongly consistent bucket type in Riak, which the implementation depends upon, is listed as "experimental" in the Riak 2.2.3 documentation.
+
+Various functions of a filesystem are not currently/yet implemented:
+
+- **No file extension**: writes can append and overwrite, but growing a file past its current size via truncate is not supported.
+- **No hardlinks or symlinks**.
+- **No UID/GID changes**: ownership operations return ENOTSUP.
+- **Directory operations are not atomic**: concurrent modifications to the same directory can conflict. The implementation detects conflicts via vclock but does not retry.
+- **Efficient directory lookup**: child lookup is O(n) in the number of entries. Acceptable for small directories, slow for large ones.
+- **No garbage collection**: orphaned chunks from failed writes are not cleaned up.
+
+Tests could be added, this is a POC but would be good/interesting to add
+
+- **benchmarking**: disk read/write throughput.
+- Test multiple concurrent clients
 
 ## Requirements
 
 - Go 1.21+
+- FUSE3 (`libfuse3-dev` on Debian/Ubuntu)
 - For integration testing: Docker
 
 ## Building
+
+```bash
+make build
+```
 
 Produces three binaries: `mkfs-bangfs`, `mount-fuse-bangfs`, `reformat-bangfs`.
 
 ## Testing
 
-As well as go unit test, this target calls a python script to test basic filesystem operations like reading/writing, creating files, etc.
-
 ### Environment Variables
 
-Set these environment variables before testing (accepted by the scripts and binaries):
+Set these before testing (accepted by scripts and binaries):
 
-- `RIAK_HOST` — Riak protobuf host address (default: `127.0.0.1` in scripts)
+- `RIAK_HOST` — Riak protobuf host (default: `127.0.0.1`)
 - `RIAK_PORT` — Riak protobuf port (default: `8087`)
 - `RIAK_HTTP_PORT` — Riak HTTP API port (default: `8098`)
 - `BANGFS_NAMESPACE` — Filesystem / bucket-type namespace prefix (required)
 - `BANGFS_MOUNTDIR` — FUSE mount point directory (required)
-- `RIAK_IMAGE` — Docker image name for Riak (default: `bangriak`)
-- `RIAK_CONTAINER` — Docker container name for Riak (default: `bangtest`)
+- `RIAK_IMAGE` — Docker image for Riak (default: `bangriak`)
+- `RIAK_CONTAINER` — Docker container name (default: `bangtest`)
 
 All three binaries also accept equivalent CLI flags (`-host`, `-port`, `-namespace`, `-mount`).
 
 ### Unit test
 
-The unit test uses a dummy key-value store that just stores keys/values as files in `/tmp/`. 
+Uses a file-backed KV store (`/tmp/`).
 
 ```bash
 make test
@@ -87,26 +138,30 @@ make test
 
 #### Setup (one time)
 
-For the integration test, you need to set up a Riak instance to test against.
-You'll need a docker container that has riak - set the `RIAK_IMAGE` env var. Start the container and initialize the bucket types for chunk data and for metadata. The scripts:
+Start a Riak container and initialize bucket types:
 
 ```bash
 ./start-riak-docker.sh
 ./init-riak-buckets-docker.sh
-````
+```
 
-  Should help. You can also run:
+Verify Riak is serving:
 
 ```bash
 ./test-riak-rest.sh
 ```
 
-To make sure the docker riak instance is serving requests.
-
-#### Running the integration test
-
-(Assuming you have a running Riak instance!), set the RIAK_HOST, RIAK_PORT, RIAK_HTTP_PORT, BANGFS_NAMESPACE env variables and do the integration test
+#### Running
 
 ```bash
 make integration-test
 ```
+
+## Future work
+
+- Benchmark read/write throughput and characterize performance bottlenecks.
+- Alternative KV backends (ScyllaDB, DynamoDB).
+- Retry logic for vclock conflicts in directory operations.
+- Directory indexing for O(1) child lookup.
+- Chunk garbage collection.
+- Multi-node Riak cluster testing.
