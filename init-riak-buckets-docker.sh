@@ -7,7 +7,7 @@
 set -e
 
 if [[ -z "$BANGFS_NAMESPACE" ]]; then BANGFS_NAMESPACE="${1:-test}"; fi
-if [[ -z "$RIAK_CONTAINER" ]]; then RIAK_CONTAINER="${2:-riak-bangfs}"; fi
+if [[ -z "$RIAK_CONTAINER" ]]; then RIAK_CONTAINER="${2:-riak}"; fi
 
 echo "Initializing BangFS bucket types with prefix: $BANGFS_NAMESPACE"
 echo "Docker container: $RIAK_CONTAINER"
