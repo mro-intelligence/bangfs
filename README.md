@@ -25,42 +25,30 @@ Experimental FUSE distributed filesystem with minimal components:
   └───────────┘         └────────────┘
 ```
 
-### Key value store
+## Key value store
 
-#### Metadata
-
-Contains almost all fields in a vfs inode, ie what you see when you `stat file`.
+**Metadata** Contains almost all fields in a vfs inode, ie what you see when you `stat file`.
 - **Metadata** requirement (inodes, directory entries): stored in a **strongly consistent** bucket. Reads always see previous writes. 
 - Metadata is keyed by inode number. The metadata values are single protobuf messages.
 - Metadata representing file inodes contains a list of chunk keys for each fixed-size chunk of data in the file.
 
-#### File chunks
-- Files are broken up into as same-size chunks (except for the last chunk in a file, which may be shorter). 
+**File chunks** Files are broken up into as same-size chunks (except for the last chunk in a file, which may be shorter). 
 - Chunks will be stored in an **eventually consistent** bucket: a read immediately after a write may not reflect the latest data.
 
-### Concurrency
+## Concurrency
 
-#### *Metadata*: 
+**Metadata:** Concurrent access to metadata via vector clocks (vclock). Metadata updates use CAS with optimistic concurrency control (ie read the data, modify it, and try to write).
 
-Concurrent access to metadata via vector clocks (vclock). Metadata updates use CAS with optimistic concurrency control (ie read the data, modify it, and try to write).
+**File Chunks:** Chunk data lives in an eventually consistent bucket. This means there is no guarantee that writes to the same chunk key will be propagated to replicas in the same order — indeed, in a distributed system there is no real concept of simultaneity ([as Lamport showed](https://lamport.azurewebsites.net/pubs/time-clocks.pdf)).
 
-#### *File Chunks*:
+**Unique Sequence numbers** If two clients wrote to the *same* chunk key, a reader could see a mix of data from different writers depending on which replica it hits. Currently this is solved with **write-once chunk keys**: each client's `IdGenerator` embeds its own identity, two clients will never produce the same key. Every chunk write (whether appending or replacing an existing chunk) generates a fresh, globally unique key. The metadata is updated to point to the new key. This gives an invariant: for any version of the metadata (containing the ordered list of chunk keys), every referenced chunk is immutable and will eventually be readable with the data that one client intended to write. 
 
-Chunk data lives in an eventually consistent bucket. This means there is no guarantee that writes to the same chunk key will be propagated to replicas in the same order — indeed, in a distributed system there is no real concept of simultaneity ([as Lamport showed](https://lamport.azurewebsites.net/pubs/time-clocks.pdf)).
-
-#### Unique Sequence numbers
-If two clients wrote to the *same* chunk key, a reader could see a mix of data from different writers depending on which replica it hits.
-
-Currently this is solved with **write-once chunk keys**: each client's `IdGenerator` embeds its own identity (see *Unique ids*), two clients will never produce the same key. Every chunk write (whether appending or replacing an existing chunk) generates a fresh, globally unique key. The metadata is updated to point to the new key.
-
-This gives a useful invariant: for any version of the metadata (containing the ordered list of chunk keys), every referenced chunk is immutable and will eventually be readable with exactly the data that one client intended to write. 
-
-### KVStore interface
+## KVStore interface
 
 The backend is abstracted behind a Go interface (`KVStore`) with separate operations for metadata and chunks.
 The current _implementation_ uses Riak's KV backend, but this interface could be implemented for any key value store.
 
-### Design decisions / tradeoffs
+## Design decisions / tradeoffs
 
 Overall the designed is for
 - Use case of single writer at a time per file:
@@ -73,14 +61,15 @@ Overall the designed is for
 
 - `mkfs-bangfs && mount-fuse-bangfs` create and mount the filesystem, visible at `$BANGFS_MOUNTDIR`
 - `make test` builds and passes 
-- `make integration-test` builds and runs against a single Riak instance. Integration tests are occasionally flaky due to Riak eventual consistency propagation delays on the chunk bucket — a read immediately after a write may not see the data yet.
+- `make integration-test` builds and passes against a single Riak instance and a Riak cluster (mileage may vary with the Riak cluster!)
 
 ## Shortcomings
 
-Conceptual
+The analysis above is not any type of proof about the properties of this filesystem.
 
-- The concept was thought up overnight. Probably nobody would actually build a production system this way.
-- The strongly consistent bucket type in Riak, which the implementation depends upon, is listed as "experimental" in the Riak 2.2.3 documentation.
+Riak
+- The strongly consistent bucket type in Riak is listed as "experimental" in the Riak 2.2.3 documentation. 
+- 
 
 Various functions of a filesystem are not currently/yet implemented:
 
@@ -91,7 +80,7 @@ Various functions of a filesystem are not currently/yet implemented:
 - **Efficient directory lookup**: child lookup is O(n) in the number of entries. Acceptable for small directories, slow for large ones.
 - **No garbage collection**: orphaned chunks from failed writes are not cleaned up.
 
-Tests could be added, this is a POC but would be good/interesting to add
+This is a POC but several tests would need to be added to make it more workable:
 
 - **benchmarking**: disk read/write throughput.
 - Test multiple concurrent clients
@@ -112,7 +101,7 @@ Produces three binaries: `mkfs-bangfs`, `mount-fuse-bangfs`, `reformat-bangfs`.
 
 ## Testing
 
-### Environment Variables
+**Environment Variables**
 
 Set these before testing (accepted by scripts and binaries):
 
@@ -126,7 +115,7 @@ Set these before testing (accepted by scripts and binaries):
 
 All three binaries also accept equivalent CLI flags (`-host`, `-port`, `-namespace`, `-mount`).
 
-### Unit test
+**Unit test**
 
 Uses a file-backed KV store (`/tmp/`).
 
@@ -134,9 +123,9 @@ Uses a file-backed KV store (`/tmp/`).
 make test
 ```
 
-### Integration test
+**Integration test**
 
-#### Setup (one time)
+Setup (one time):
 
 Start a Riak container and initialize bucket types:
 
