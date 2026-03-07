@@ -75,6 +75,7 @@ class Test:
     cleanup: Optional[str] = None          # command to run after test
     check_path: Optional[str] = None       # for FILE_EXISTS, FILE_GONE
     informational: bool = False            # if True, failure doesn't skip/count
+    integration_only: bool = False         # if True, only run test in integration test environment
 
 
 # ============================================================================
@@ -917,6 +918,18 @@ TESTS = [
                "test $(du -b '{mount}/foo' | cut -f1) -eq $((8192*100))",
                Expected.SUCCESS),
 
+          Test("wait fpr caches to time out", "sleep 30", Expected.SUCCESS),
+
+          Test("file still exists",
+               "stat '{mount}/foo'",
+               Expected.SUCCESS,
+               informational=True),
+
+          Test("disk space in bytes is still as expected",
+               "test $(du -b '{mount}/foo' | cut -f1) -eq $((8192*100))",
+               Expected.SUCCESS,
+               informational=True),
+
           Test("du -b is equal between filesystems",
                "test $(du -b '{tmpdir}/bangfs_testfoo' | cut -f1) -eq $(du -b '{mount}/foo' | cut -f1)",
                Expected.SUCCESS),
@@ -1037,7 +1050,7 @@ def run_test(test: Test, mount: str) -> bool:
         run_command(test.setup.format(mount=mount, tmpdir=TMPDIR))
 
     # Run the test command
-    success, stdout, stderr = run_command(cmd)
+    success, stdout, stderr = run_command(cmd, timeout=60) # Some tests include a pause of 30s
 
     # Evaluate result
     passed = False
@@ -1298,7 +1311,7 @@ def _phase_matches(phase_name: str, phase_filter: str) -> bool:
             return True
     return False
 
-def run_tests(mount: str, phase_filter: str = "") -> tuple[int, int, int]:
+def run_tests(mount: str, phase_filter: str = "", integration=False) -> tuple[int, int, int]:
     """Run all tests, return (passed, failed, skipped) counts"""
     passed = 0
     failed = 0
@@ -1314,6 +1327,9 @@ def run_tests(mount: str, phase_filter: str = "") -> tuple[int, int, int]:
             if phase_failed and not TEST_NOSKIP and not is_cleanup:
                 print(f"  {YELLOW}SKIP{RESET} {test.description}")
                 skipped += 1
+                continue
+            elif test.integration_only and not integration:
+                print(f"  {BLUE}SKIP{RESET} {test.description}")
                 continue
             if run_test(test, mount):
                 passed += 1
@@ -1407,7 +1423,7 @@ Examples:
             sys.exit(1)
 
         # Run tests
-        passed, failed, skipped = run_tests(mount, phase_filter=args.phase)
+        passed, failed, skipped = run_tests(mount, phase_filter=args.phase, integration=(not args.dummy))
 
         # Summary
         total = passed + failed + skipped

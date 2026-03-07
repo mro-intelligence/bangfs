@@ -112,7 +112,7 @@ func (f *BangFH) writeMeta(ctx context.Context) error {
 	}
 
 	f.VClock = new_vclock // Our metadata should be in sync with what was written
-	//op.Debugf("Metadata updated for inode %d, new vclcok: %v", f.Inum, f.VClock)
+	//op.Debugf("Metadata updated for inode %d", f.Inum)
 	op.Done()
 	return nil
 }
