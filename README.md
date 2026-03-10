@@ -1,5 +1,7 @@
 # BangFS
 
+**This is an experimental project and a work in progress.** Basic single-client file operations work (see [tests](#testing) below), but there are known gaps and likely unknown ones too. The idea — a distributed filesystem backed only by a KV store, no other services — came from wanting to implement distributed systems concepts hands-on (consistency models, CAS concurrency, chunked storage) and from noticing that Riak is still actively used and could serve both roles. Design decisions are discovered as much as planned — for example, the need for a unique ID generator only became obvious after hitting collisions. The overall approach may or may not be viable at scale — early tests are promising but error handling and recovery needed for a real distributed filesystem are not built (and indeed may require more components). See [Shortcomings](#shortcomings) for an honest accounting of what's missing, and run [`test/test_bangfs.py`](test/test_bangfs.py) for an up-to-date picture of what works.
+
 Experimental FUSE distributed filesystem with minimal components:
 
 - A key value store for metadata.
@@ -183,31 +185,22 @@ make integration-test
 
 ## Shortcomings
 
-The analysis above is not any type of proof about the properties of this filesystem.
+This design is is viable in the happy path (see [tests](#testing)) for  single-writer, read-heavy workloads but is so far not viable for general-purpose multi-client filesystem use: 
+- **No crash recovery:** chunks are written before metadata. If the metadata update fails (vclock conflict, crash, network error), orphaned chunks are never cleaned up. There is no write-ahead log.
+- **No conflict resolution:** CAS on metadata detects concurrent writes but does not retry or merge — the write is dropped and the client gets EIO.
+- **Multi-step operations are not atomic:** rename updates 3 metadata keys sequentially. A failure mid-way can leave the filesystem in an inconsistent state (eg, file removed from source directory but not added to target).
+- **Read-after-write visibility:** a read immediately after a write may fail to find a chunk that metadata already references, due to eventual consistency propagation delay.
 
-Riak
-- The strongly consistent bucket type in Riak is listed as "experimental" in the Riak 2.2.3 documentation. 
-- 
+The strongly consistent bucket type in Riak is listed as "experimental" in the Riak 2.2.3 documentation. 
 
-Various functions of a filesystem are not currently/yet implemented:
+Various functions of a filesystem are not currently/yet implemented (see [tests](#testing) for the SOT on this).
 
-- **No file extension**: writes can append and overwrite, but growing a file past its current size via truncate is not supported.
-- **No hardlinks or symlinks**.
-- **No UID/GID changes**: ownership operations return ENOTSUP.
-- **Directory operations are not atomic**: concurrent modifications to the same directory can conflict. The implementation detects conflicts via vclock but does not retry.
-- **Efficient directory lookup**: child lookup is O(n) in the number of entries. Acceptable for small directories, slow for large ones.
-- **No garbage collection**: orphaned chunks from failed writes are not cleaned up.
+Several tests would need to be added to really kick the tires on this.
 
-This is a POC but several tests would need to be added to make it more workable:
-
-- **benchmarking**: disk read/write throughput.
-- Test multiple concurrent clients
-
-## Future work
+## Future ideas
 
 - Benchmark read/write throughput and characterize performance bottlenecks.
 - Alternative KV backends (ScyllaDB, DynamoDB).
 - Retry logic for vclock conflicts in directory operations.
 - Directory indexing for O(1) child lookup.
 - Chunk garbage collection.
-- Multi-node Riak cluster testing.
