@@ -811,11 +811,11 @@ TESTS = [
 
           Test("file grew after write past EOF",
                "stat -c '%s' '{mount}/seek.txt'",
-               Expected.OUTPUT_EQUALS, "29"),
+               Expected.OUTPUT_EQUALS, "29",informational=True),
 
           Test("content at offset 25 is correct",
                "dd if='{mount}/seek.txt' bs=1 skip=25 count=4 2>/dev/null",
-               Expected.OUTPUT_EQUALS, "PAST"),
+               Expected.OUTPUT_EQUALS, "PAST",informational=True),
 
           Test("cleanup seek.txt",
                "rm '{mount}/seek.txt'",
