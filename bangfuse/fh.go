@@ -88,63 +88,56 @@ func (f *BangFH) appendAChunk(ctx context.Context, data []byte) error {
 	return nil
 }
 
-// modifyChunk modifies the chunk at given index, writes data at given offset in chunk, returns number of overlap bytes
+// modifyChunk writes data at offset within the chunk at w_chkidx
 func (f *BangFH) modifyChunk(ctx context.Context, w_chkidx int, w_chkoffset uint64, data []byte) error {
-	op := bangutil.GetTracer().Op("modfyChunk", f.Inum, f.Metadata.Name)
+	op := bangutil.GetTracer().Op("modifyChunk", f.Inum, f.Metadata.Name)
 
-	// check if len is in bounds
 	if w_chkidx >= len(f.Metadata.Chunks) {
-		return fmt.Errorf("modifyChunk: chunk idx (%d) out of range (%d)", w_chkidx, len(f.Metadata.Chunks))
+		return fmt.Errorf("modifyChunk: idx %d >= %d", w_chkidx, len(f.Metadata.Chunks))
 	}
 
-	// check if data will fit within chunk
 	data_len := uint64(len(data))
 	if data_len+w_chkoffset > GetChunkSize() {
-		return fmt.Errorf("modifyChunk: data size (%d) + offset (%d) > chunk size (%d>%d)", data_len, w_chkoffset, data_len+w_chkoffset, GetChunkSize())
+		return fmt.Errorf("modifyChunk: %d+%d > chunksize %d", data_len, w_chkoffset, GetChunkSize())
 	}
 
 	// REVISIT
 	meta_chunk_len := f.Metadata.Chunks[w_chkidx].Size
 	if w_chkoffset > meta_chunk_len {
-		return fmt.Errorf("modifyChunk: refusing to write after end of chunk: chunk_len: %d offset: %d", meta_chunk_len, w_chkoffset)
+		return fmt.Errorf("modifyChunk: offset %d past chunk end %d", w_chkoffset, meta_chunk_len)
 	}
 
-	// read the chunk
 	chk_key := f.Metadata.Chunks[w_chkidx].Hash
 	chk_data, err := gKVStore.Chunk(chk_key)
 	if err != nil {
 		return err
 	}
 
-	// fix it up
+	// Reconcile actual chunk length with metadata
 	if chunk_len := uint64(len(chk_data)); chunk_len > meta_chunk_len {
-		// Use metadata as SOT
 		chk_data = chk_data[:meta_chunk_len]
 	}
 	if chunk_len := uint64(len(chk_data)); chunk_len < meta_chunk_len {
-		// Use metadata as SOT
-		delta := meta_chunk_len - chunk_len
-		chk_data = append(chk_data, make([]byte, delta)...)
+		chk_data = append(chk_data, make([]byte, meta_chunk_len-chunk_len)...)
 	}
 
 	if w_chkoffset == meta_chunk_len {
 		chk_data = append(chk_data, data...)
 		f.Metadata.Size += data_len
 		f.Metadata.Chunks[w_chkidx].Size += data_len
-		op.Debugf("appended %d bytes to chunk %v", data_len, w_chkidx)
+		op.Debugf("chk[%d] append %d", w_chkidx, data_len)
 	} else if w_chkoffset+data_len > meta_chunk_len {
 		pad_len := w_chkoffset + data_len - meta_chunk_len
 		chk_data = append(chk_data, make([]byte, pad_len)...)
 		copy(chk_data[w_chkoffset:w_chkoffset+data_len], data)
 		f.Metadata.Size += pad_len
 		f.Metadata.Chunks[w_chkidx].Size += pad_len
-		op.Debugf("write %d bytes, chunk %v  extended  %d bytes", data_len, w_chkidx, pad_len)
+		op.Debugf("chk[%d] extend +%d", w_chkidx, pad_len)
 	} else {
 		copy(chk_data[w_chkoffset:w_chkoffset+data_len], data)
-		op.Debugf("overwrite %d bytes chunk %v", data_len, w_chkidx)
+		op.Debugf("chk[%d] overwrite %d@%d", w_chkidx, data_len, w_chkoffset)
 	}
 
-	// Write buffer back to kvstore
 	if err := gKVStore.PutChunk(chk_key, chk_data); err != nil {
 		return err
 	}
@@ -153,26 +146,21 @@ func (f *BangFH) modifyChunk(ctx context.Context, w_chkidx int, w_chkoffset uint
 	return nil
 }
 
-// Write writes to the inode at the given offset and returns the number of bytes written.
-// Handles append, overwrite, and write-past-EOF (zero-fill gap).\
-// Uses uint64 where possible for all calculations, but returns uint32 as required by API.
-// ie we also assume no negative offsets or writes > 2^31 bytes.
+// Write writes data at off_in, handling append/overwrite/extend. Returns bytes written.
 func (f *BangFH) Write(ctx context.Context, data []byte, off_in int64) (uint32, syscall.Errno) {
 	f.mut.Lock()
 	defer f.mut.Unlock()
 
 	op := bangutil.GetTracer().Op("Write", f.Inum, f.Metadata.Name)
-	//op.Debugf("Write %d bytes at offset %d to inode %d", len(data), off, f.Inum)
 
-	// Re-read metadata: Setattr (e.g. O_TRUNC truncate) may have changed it.
-	// REVISIT: to save an extra read call we can track filehandles in the BangFile struct.
+	// REVISIT: resync to catch Setattr changes; could track FHs in BangFile instead
 	if err := f.resyncMetadata(ctx); err != nil {
 		op.Error(fmt.Errorf("resyncMetadata: %v", err))
 		return 0, syscall.EIO
 	}
 
 	if off_in < 0 {
-		op.Error(fmt.Errorf("negative offset not supported"))
+		op.Error(fmt.Errorf("negative offset"))
 		return 0, syscall.ENOTSUP
 	}
 
@@ -185,15 +173,13 @@ func (f *BangFH) Write(ctx context.Context, data []byte, off_in int64) (uint32, 
 	data_len := uint64(len(data))
 
 	for w_off-w_off_st < data_len {
-
 		w_chkidx := int(w_off / GetChunkSize())
 		w_chkoffset := w_off % GetChunkSize()
 		w_len := min(GetChunkSize()-w_chkoffset, data_len-data_off)
 
-		op.Debugf("w_chkidx:%v w_chkoffset:%v w_len:%v w_off:%v w_off_st:%v (bytes written):%v data_len:%v", w_chkidx, w_chkoffset, w_len, w_off, w_off_st, w_off-w_off_st, data_len)
+		op.Debugf("chk[%d] off=%d len=%d written=%d/%d", w_chkidx, w_chkoffset, w_len, w_off-w_off_st, data_len)
 
 		if w_chkidx == len(f.Metadata.Chunks) {
-			op.Debugf("appending chunk: data[%v:%v]", data_off, data_off+w_len)
 			if err := f.appendAChunk(ctx, data[data_off:data_off+w_len]); err != nil {
 				op.Error(err)
 				return uint32(w_off - w_off_st), syscall.EIO
@@ -203,8 +189,6 @@ func (f *BangFH) Write(ctx context.Context, data []byte, off_in int64) (uint32, 
 			continue
 		}
 		if w_chkidx < len(f.Metadata.Chunks) {
-			op.Debugf("modifying chunk: data[%v:%v]", w_off, w_off+w_len)
-
 			err := f.modifyChunk(ctx, w_chkidx, w_chkoffset, data[data_off:data_off+w_len])
 			if err != nil {
 				op.Error(err)
@@ -214,12 +198,11 @@ func (f *BangFH) Write(ctx context.Context, data []byte, off_in int64) (uint32, 
 			w_off += w_len
 			continue
 		}
-		// error
-		op.Errorf("refusing to extend file: w_chkidx: %d out of range: %d", w_chkidx, len(f.Metadata.Chunks))
+		op.Errorf("chk idx %d out of range %d", w_chkidx, len(f.Metadata.Chunks))
 		return uint32(w_off - w_off_st), syscall.EIO
 	}
 
-	op.Debugf("write done: w_off: %v w_off_st: %v (bytes written): %v data_len: %v", w_off, w_off_st, w_off-w_off_st, data_len)
+	op.Debugf("wrote %d bytes @%d", w_off-w_off_st, w_off_st)
 
 	err := f.writeMeta(ctx)
 	if err != nil {
@@ -227,7 +210,6 @@ func (f *BangFH) Write(ctx context.Context, data []byte, off_in int64) (uint32, 
 		return uint32(w_off - w_off_st), syscall.EIO
 	}
 
-	//op.Debugf("Wrote %d bytes at offset %d (new size: %d)", len(data), off, f.Metadata.Size)
 	op.Done()
 	return uint32(len(data)), 0
 }
